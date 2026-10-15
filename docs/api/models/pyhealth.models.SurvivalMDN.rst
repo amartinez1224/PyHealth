@@ -17,6 +17,9 @@ unit; no implicit normalization is performed. Check raw vector widths before
 processing: the collator can pad ragged vectors, and model shape validation
 cannot distinguish that padding from actual zeros.
 
+Selected field names must be distinct, nonempty strings. The name ``self``
+is reserved by PyTorch's keyword-call wrapper and is rejected at construction.
+
 The processed dataset must contain exactly one input and two output fields,
 with fitted tensor processors. Features have processor schema ``("value",)``,
 ``dim() == (1,)``, and positive ``size()``. Labels have the same processor

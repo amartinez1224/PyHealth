@@ -59,7 +59,8 @@ class SurvivalMDN(BaseModel):
 
     Args:
         dataset: Nonempty processed dataset with exactly the selected schemas.
-        feature_key: Dense vector input field.
+        feature_key: Dense vector input field. Selected field names must be
+            distinct nonempty strings other than PyTorch's reserved ``self``.
         duration_key: Positive duration output field.
         event_key: Binary event output field.
         hidden_dims: Nonempty sequence of positive hidden widths.
@@ -122,6 +123,8 @@ class SurvivalMDN(BaseModel):
         keys = (feature_key, duration_key, event_key)
         if any(not isinstance(key, str) or not key for key in keys):
             raise ValueError("Field names must be nonempty strings.")
+        if "self" in keys:
+            raise ValueError("Field name 'self' is reserved by PyTorch keyword calls.")
         if len(set(keys)) != 3:
             raise ValueError(
                 "Feature, duration and event field names must be distinct."

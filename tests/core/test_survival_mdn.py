@@ -444,6 +444,9 @@ class TestSurvivalMDN(unittest.TestCase):
             {"min_scale": float("nan")},
             {"min_scale": float("inf")},
             {"feature_key": ""},
+            {"feature_key": "self"},
+            {"duration_key": "self"},
+            {"event_key": "self"},
             {"event_key": "duration"},
             {"duration_key": None},
         ]
