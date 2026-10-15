@@ -43,7 +43,25 @@ def _log_survival(times, log_weights, means, scales):
         times, log_weights, means, scales
     )
     standardized = (latent - means) / scales
-    return torch.logsumexp(weights + torch.special.log_ndtr(-standardized), dim=-1)
+    # log_ndtr's backward subtracts large nearly equal log terms in the
+    # right tail. The scaled complementary error function avoids that loss
+    # of precision: S(a) = exp(-a**2 / 2) * erfcx(a / sqrt(2)) / 2.
+    right = standardized > 0
+    component = torch.empty_like(standardized)
+    a = standardized[right]
+    component[right] = (
+        -0.5 * a.square()
+        + torch.special.erfcx(a / math.sqrt(2)).log()
+        - math.log(2)
+    )
+    component[~right] = torch.special.log_ndtr(-standardized[~right])
+    # Center before adding weights so huge tail log probabilities do not
+    # erase their relative weights, or the normalization in backward.
+    offset = component.max(dim=-1, keepdim=True).values.detach()
+    return (
+        torch.logsumexp(weights + (component - offset), dim=-1)
+        + offset[..., 0]
+    )
 
 
 class SurvivalMDN(BaseModel):

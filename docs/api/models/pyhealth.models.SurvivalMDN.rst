@@ -114,7 +114,15 @@ survival are
         \delta_i\log f(t_i\mid x_i)+(1-\delta_i)\log S(t_i\mid x_i)\right].
 
 The Jacobian belongs only in the density. Gaussian log survival uses
-``torch.special.log_ndtr`` rather than subtracting a rounded CDF from one.
+``torch.special.log_ndtr`` for nonpositive standardized times. For positive
+standardized times ``a``, it uses the equivalent expression
+``-a**2 / 2 + log(erfcx(a / sqrt(2))) - log(2)``. This preserves tail gradients
+that direct float32 ``log_ndtr`` backward can lose through cancellation.
+Component log probabilities are centered before adding mixture log weights,
+preserving gradient normalization when several components share a deep tail.
+Tests compare gradients to an independent inverse Mills-ratio expansion at
+standardized times from 5,000 to 1,000,000, including the default scale floor.
+Neither branch subtracts a rounded CDF from one.
 Only observed patients evaluate the density contribution; only censored
 patients evaluate the survival contribution. This avoids multiplying unused
 infinite terms by zero. A continuous density may exceed one, so negative mean
