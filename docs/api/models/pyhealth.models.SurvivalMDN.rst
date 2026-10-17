@@ -174,6 +174,13 @@ or processor metadata. A short synthetic run establishes integration, not
 paper-level clinical accuracy. SUPPORT processing, shared/uniform weights,
 survival metrics, and the later 18-run experiment belong to future work.
 
+For a cell-by-cell walkthrough, open
+``examples/survival_mdn_synthetic.ipynb`` in a notebook kernel with this checkout
+installed. It uses the script's synthetic data generator and adds plots of
+observed follow-up, patient survival curves, and component weights, followed
+by a checkpoint round trip. CPU is the verified default, including on Apple
+Silicon; MPS execution is not validated. Setup instructions are in the notebook.
+
 Reference validation and reproduction
 -------------------------------------
 
