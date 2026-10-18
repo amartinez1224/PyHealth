@@ -2,11 +2,13 @@
 
 import math
 from collections.abc import Sequence
+from typing import Any
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..datasets import SampleDataset
 from ..processors import TensorProcessor
 from .base_model import BaseModel
 
@@ -34,7 +36,14 @@ def _log_density(times, log_weights, means, scales):
     )
     standardized = (latent - means) / scales
     normal = -0.5 * standardized.square() - scales.log() - 0.5 * math.log(2 * math.pi)
-    return torch.logsumexp(weights + normal, dim=-1) - log_inverse[..., 0]
+    # Center before adding weights to preserve their precision and the
+    # normalization in backward when component log densities are very negative.
+    offset = normal.max(dim=-1, keepdim=True).values.detach()
+    return (
+        torch.logsumexp(weights + (normal - offset), dim=-1)
+        + offset[..., 0]
+        - log_inverse[..., 0]
+    )
 
 
 def _log_survival(times, log_weights, means, scales):
@@ -128,16 +137,16 @@ class SurvivalMDN(BaseModel):
 
     def __init__(
         self,
-        dataset,
-        feature_key="features",
-        duration_key="duration",
-        event_key="event",
-        hidden_dims=(64, 64, 64),
-        n_components=5,
-        activation="prelu",
-        batch_norm=False,
-        min_scale=1e-4,
-    ):
+        dataset: SampleDataset,
+        feature_key: str = "features",
+        duration_key: str = "duration",
+        event_key: str = "event",
+        hidden_dims: Sequence[int] = (64, 64, 64),
+        n_components: int = 5,
+        activation: str = "prelu",
+        batch_norm: bool = False,
+        min_scale: float = 1e-4,
+    ) -> None:
         keys = (feature_key, duration_key, event_key)
         if any(not isinstance(key, str) or not key for key in keys):
             raise ValueError("Field names must be nonempty strings.")
@@ -283,7 +292,7 @@ class SurvivalMDN(BaseModel):
             raise ValueError(f"{name} must have shape [B] or [B, 1] matching features.")
         return value
 
-    def forward(self, **kwargs):
+    def forward(self, **kwargs: Any) -> dict[str, torch.Tensor]:
         """Return [B, K] log_weights, means, scales and optional scalar loss.
 
         Both duration/event labels or neither must be supplied. Unrelated
@@ -335,7 +344,9 @@ class SurvivalMDN(BaseModel):
             raise ValueError("Mean loss exceeds the supported numerical range.")
         return outputs
 
-    def predict_survival(self, times, /, **kwargs):
+    def predict_survival(
+        self, times: torch.Tensor, /, **kwargs: Any
+    ) -> torch.Tensor:
         """Return differentiable [B, T] survival probabilities on a shared grid.
 
         Args:

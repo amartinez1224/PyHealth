@@ -118,10 +118,14 @@ The Jacobian belongs only in the density. Gaussian log survival uses
 standardized times ``a``, it uses the equivalent expression
 ``-a**2 / 2 + log(erfcx(a / sqrt(2))) - log(2)``. This preserves tail gradients
 that direct float32 ``log_ndtr`` backward can lose through cancellation.
-Component log probabilities are centered before adding mixture log weights,
-preserving gradient normalization when several components share a deep tail.
-Tests compare gradients to an independent inverse Mills-ratio expansion at
-standardized times from 5,000 to 1,000,000, including the default scale floor.
+Both component log densities and log survival probabilities are centered using
+a detached maximum before adding mixture log weights. This preserves weight
+precision and gradient normalization when several components share a deep tail.
+Tests compare density gradients to analytic Gaussian derivatives and survival
+gradients to an independent inverse Mills-ratio expansion at standardized times
+from 5,000 to 1,000,000, including the default scale floor. Identical components
+must produce zero weight-logit gradients. These checks do not imply stability
+for arbitrary parameter magnitudes.
 Neither branch subtracts a rounded CDF from one.
 Only observed patients evaluate the density contribution; only censored
 patients evaluate the survival contribution. This avoids multiplying unused
@@ -137,19 +141,15 @@ Separate heads predict logits, latent means, and raw scales. The model uses
 ``log_softmax`` weights and ``softplus(raw_scale) + min_scale`` standard
 deviations. Mean-head weights start at zero and biases at evenly spaced
 centers in ``[-3, 3]``; the single-component center is zero. Other heads use
-ordinary PyTorch initialization. Defaults are API choices, not selected SUPPORT
-hyperparameters.
+ordinary PyTorch initialization.
 
 Optional BatchNorm sits between each hidden linear layer and activation, with
 hidden linear biases disabled. BatchNorm training requires at least two
 patients per batch; singleton evaluation works. The default supports singleton
-training. The authors' default network uses BatchNorm/PReLU, hard-clamps means
+training. The reference Survival-MDN network uses BatchNorm/PReLU, hard-clamps means
 and raw scales, and uses different numerical adjustments. This implementation
-uses stable formulas, a scale floor, optional BatchNorm, and no copied output
-clamps. Enabling BatchNorm alone does not make the networks equivalent. Before
-a later SUPPORT reproduction, resolve the reference clamps and initialization
-as explicit baseline choices or report their differences. Trained network or
-optimizer-trajectory parity is not claimed here.
+uses stable formulas, a scale floor, optional BatchNorm, and unclamped output
+heads. These choices affect the resulting distributions and training behavior.
 
 ``model.mode`` is ``None``. ``Trainer.train`` consumes the custom scalar loss;
 ``Trainer.evaluate`` reports loss only. Monitor ``loss`` with
@@ -170,9 +170,7 @@ trains on 256 patients, validates on 64, and uses batch size 32. It saves a
 grid, survival probabilities, constructor settings, and a state dictionary,
 and checks checkpoint reload equivalence. Reconstruct with the same settings
 and a compatible processed dataset; weights alone do not store configuration
-or processor metadata. A short synthetic run establishes integration, not
-paper-level clinical accuracy. SUPPORT processing, shared/uniform weights,
-survival metrics, and the later 18-run experiment belong to future work.
+or processor metadata.
 
 For a cell-by-cell walkthrough, open
 ``examples/survival_mdn_synthetic.ipynb`` in a notebook kernel with this checkout

@@ -7,10 +7,11 @@ Run from the repository root::
 All times use one arbitrary synthetic time unit. Features determine latent
 Gaussian mixture weights and means; event times are softplus-transformed latent
 draws. Independent exponential censoring gives observed durations and binary
-event indicators. This small demonstration does not reproduce paper accuracy.
-The model evaluates censored observations in log space with stable Gaussian
-tail gradients. This example uses moderate times; deep-tail gradient accuracy
-is checked separately by the model's regression tests.
+event indicators.
+The model evaluates observed and censored observations in log space, centering
+component log densities and log survival probabilities before adding weights
+to preserve mixture gradients. This example uses moderate times; deep-tail
+gradient accuracy is checked separately by the model's regression tests.
 """
 
 import argparse

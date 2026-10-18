@@ -221,6 +221,43 @@ class TestSurvivalDistribution(unittest.TestCase):
                             dw, torch.zeros_like(dw), rtol=0, atol=tolerance
                         )
 
+    def test_deep_tail_density_gradient_accuracy_and_mixture_normalization(self):
+        # At t=100, inverse softplus and its derivative equal t and 1 to
+        # either dtype's precision. Use analytic single-Gaussian derivatives;
+        # identical components must reduce to that same Gaussian.
+        for dtype in (torch.float32, torch.float64):
+            for scale in (0.02, 0.001, 1e-4):
+                for components in (1, 3):
+                    with self.subTest(dtype=dtype, scale=scale, k=components):
+                        times = torch.tensor([100.0], dtype=dtype, requires_grad=True)
+                        means = torch.zeros(
+                            1, components, dtype=dtype, requires_grad=True
+                        )
+                        scales = torch.full(
+                            (1, components), scale, dtype=dtype, requires_grad=True
+                        )
+                        logits = torch.arange(components, dtype=dtype)[None, :]
+                        logits.requires_grad_()
+                        log_weights = logits.log_softmax(-1)
+                        value = _log_density(times, log_weights, means, scales)
+                        dt, dm, ds, dw = torch.autograd.grad(
+                            value.sum(), (times, means, scales, logits)
+                        )
+                        a = 100.0 / float(scales.detach()[0, 0])
+                        weights = log_weights.detach().exp()
+                        tolerance = 2e-6 if dtype == torch.float32 else 1e-10
+                        for actual, expected in (
+                            (dt, torch.full_like(dt, -a / scale)),
+                            (dm, weights * (a / scale)),
+                            (ds, weights * ((a * a - 1) / scale)),
+                        ):
+                            torch.testing.assert_close(
+                                actual, expected, rtol=tolerance, atol=0
+                            )
+                        torch.testing.assert_close(
+                            dw, torch.zeros_like(dw), rtol=0, atol=tolerance
+                        )
+
 
 class TestSurvivalReference(unittest.TestCase):
     def test_recorded_author_distribution_and_actual_criterion(self):
