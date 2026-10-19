@@ -92,6 +92,9 @@ checkpoint, and exports every test curve. See
 `the SUPPORT example guide
 <https://github.com/sunlabuiuc/PyHealth/blob/master/examples/survival_mdn_support_README.md>`_
 for commands, fingerprints, preprocessing audit, and reference differences.
+The companion ``examples/survival_mdn_support.ipynb`` provides an interactive
+walkthrough of local data inspection, baseline training/reload, aggregate curves,
+and exact prediction-only replay. Its committed version contains no outputs.
 Times use released SUPPORT units plus a single ``0.001``
 offset; no calendar-day mapping is known. Benchmark records and run artifacts
 are not distributed with PyHealth.
