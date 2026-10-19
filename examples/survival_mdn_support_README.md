@@ -191,8 +191,42 @@ git diff --check
 python tools/check_pr_rules.py --base feat/survival-mdn-core --head HEAD
 ```
 
-The adapter branch boundary is core commit
-`8a268b02d384c1edd8d5429f429fda8d9cd0d05c`. The intended initial PR base is `feat/survival-mdn-core`. After core
-lands, verify the actual destination branch and preserve this boundary when
-rebasing adapter-only commits after a squash/rebase merge. No PR is created or
-pushed by this example.
+## Recorded real-data acceptance (2026-10-18)
+
+The split-1 fingerprints/counts above were verified before training. The frozen
+configuration was run at implementation commit
+`00e44c5f49eef35fafbb47a8e4218abcb581b17b`, followed by an independent repeat and
+prediction-only replay. The environment was Python 3.12.14, PyTorch 2.14.1,
+NumPy 2.5.4, PyHealth 2.0.2, litdata 0.2.67, macOS 27.0.1 arm64, one intra-op
+thread and 12 inter-op threads. The manifest records the Git revision and
+working-tree status for each run.
+
+The runs used the commands and output directories shown above. All generated
+artifacts remain ignored by Git.
+
+| Run | Initial train NLL | Initial valid NLL | Restored valid NLL | Training seconds |
+| --- | --- | --- | --- | --- |
+| Two-epoch smoke | 1.302007914 | 1.299908400 | 0.606143355 | 0.060 |
+| Frozen baseline | 1.302007914 | 1.299908400 | 0.514571548 | 0.752 |
+| Same-seed repeat | 1.302007914 | 1.299908400 | 0.514571548 | 0.766 |
+
+The baseline Trainer log identifies the best checkpoint at zero-based epoch 15
+(step 336), then early stopping at epoch 25 (step 546): 26 epochs executed with
+patience 10. The table's selected NLL was independently evaluated after
+restoration.
+All 21 training batches retained all 5370 rows, including the final 250 rows;
+validation used one batch of 1776 rows.
+
+Each run exported finite, valid `[1727, 128]` survival curves. The saved grid is
+float32 with endpoints `0` and `5.556098937988281`, based only on training times.
+Every run's fresh-model checkpoint reload matched all test predictions exactly.
+An independent comparison found **all 16 checkpoint tensors and all eight
+prediction arrays exactly equal** between baseline and repeat, and between
+baseline and prediction-only replay (including row IDs, labels, and times).
+Elapsed times were excluded from equality checks. No test metric or score
+threshold was used, and no individual benchmark records are included here.
+
+Offline validation passed: all 10 adapter tests; 28 core tests with one CUDA
+availability skip; Ruff; `git diff --check`; and the contribution checker against
+`feat/survival-mdn-core`. The adapter leaves the shared model, Trainer, datasets,
+and tasks implementations unchanged.
