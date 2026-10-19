@@ -81,6 +81,21 @@ problem in a useful numerical range. Tests cover times from ``1e-8`` to
 ``100``, scales down to ``0.02``, and separated latent means; those controlled
 cases are stress checks, not universal bounds for every parameter combination.
 
+Released SUPPORT baseline
+-------------------------
+
+``examples/survival_mdn_support.py`` trains this model on preprocessed SUPPORT
+data from the Survival-MDN repository, preserving partitions and archive row
+identity.
+It trains a fixed CPU baseline, selects on validation NLL, reloads the best
+checkpoint, and exports every test curve. See
+`the SUPPORT example guide
+<https://github.com/sunlabuiuc/PyHealth/blob/master/examples/survival_mdn_support_README.md>`_
+for commands, fingerprints, preprocessing audit, and reference differences.
+Times use released SUPPORT units plus a single ``0.001``
+offset; no calendar-day mapping is known. Benchmark records and run artifacts
+are not distributed with PyHealth.
+
 Distribution and likelihood
 ---------------------------
 
