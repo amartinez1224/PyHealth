@@ -136,6 +136,27 @@ initial training NLL also uses one full batch. No epoch number is guessed from
 the requested epoch budget. The reported final validation NLL is evaluated
 after best-state restoration.
 
+## Interactive notebook
+
+Open [survival_mdn_support.ipynb](survival_mdn_support.ipynb) for the interactive
+walkthrough. It reuses this adapter to inspect local archives, check tensor
+contracts, train or load the frozen baseline, plot validation history and
+aggregate survival curves, and verify every prediction array/checkpoint tensor
+against prediction-only replay. Individual-row plots are disabled by default.
+
+The notebook defaults to the existing `output/support-baseline` run. Set its
+local data/run paths in setup, or explicitly enable `RUN_TRAINING` to train into
+a fresh directory. Replay always gets a fresh output directory. No downloads or
+metrics are added. Use the documented Jupyter kernel setup, and clear outputs
+before committing or sharing; keep executed notebooks and run artifacts local.
+
+Notebook verification executed all eight code cells in both existing-run and
+fresh-training modes, including optional individual-row plotting in the local
+verification copy. The validation-history and aggregate-curve plots were
+visually inspected. Each replay matched all eight export arrays and 16
+checkpoint tensors for all 1727 rows; fresh notebook training also matched the
+recorded frozen baseline exactly. The committed notebook has no outputs.
+
 ## Commands and artifacts
 
 From the PyHealth repository root, using a compatible installed Python:
