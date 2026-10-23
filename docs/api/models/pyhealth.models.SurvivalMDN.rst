@@ -149,8 +149,8 @@ training.
 ``monitor_criterion="min"`` and a short patience. Generic
 ``Trainer.inference()`` expects classification-style outputs and does not
 support this output contract; use ``predict_survival`` instead.
-Trainer averages validation losses by batch, so use equal-size validation
-batches when a per-patient validation mean is needed.
+Trainer weights validation batch losses by their sample counts, so a short
+final batch contributes proportionally to the per-patient validation mean.
 
 The self-contained synthetic walkthrough is
 ``examples/survival_mdn_synthetic.ipynb``. It generates independent censoring

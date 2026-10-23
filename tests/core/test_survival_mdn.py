@@ -728,6 +728,19 @@ class TestSurvivalMDN(unittest.TestCase):
 
 
 class TestSurvivalIntegration(unittest.TestCase):
+    def test_evaluation_loss_with_unequal_batches(self):
+        torch.manual_seed(42)
+        dataset = _dataset()
+        model = SurvivalMDN(dataset, hidden_dims=(4,), n_components=2)
+        trainer = Trainer(model, device="cpu", enable_logging=False)
+        expected = float(model(**_batch(dataset))["loss"].detach())
+        for batch_size in (1, 3, 4):
+            with self.subTest(batch_size=batch_size):
+                loader = get_dataloader(dataset, batch_size=batch_size, shuffle=False)
+                self.assertAlmostEqual(
+                    trainer.evaluate(loader)["loss"], expected, places=5
+                )
+
     def test_all_censored_and_all_observed_processed_datasets(self):
         for events in ((0.0,) * 4, (1.0,) * 4):
             dataset = _dataset(events)
