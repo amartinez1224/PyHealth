@@ -20,8 +20,9 @@ cannot distinguish that padding from actual zeros.
 Selected field names must be distinct, nonempty strings. The name ``self``
 is reserved by PyTorch's keyword-call wrapper and is rejected at construction.
 
-The processed dataset must contain exactly one input and two output fields,
-with fitted tensor processors. Features have processor schema ``("value",)``,
+The processed dataset must contain the selected input and two output fields.
+Additional fields are allowed. Compatible fitted processors must expose numeric
+tensor metadata; the built-in tensor processors are the simplest option. Features have processor schema ``("value",)``,
 ``dim() == (1,)``, and positive ``size()``. Labels have the same processor
 schema, size one, and dimension zero or one. Use tensor processing for events,
 so datasets with only events or only censored patients remain valid:
@@ -121,11 +122,6 @@ that direct float32 ``log_ndtr`` backward can lose through cancellation.
 Both component log densities and log survival probabilities are centered using
 a detached maximum before adding mixture log weights. This preserves weight
 precision and gradient normalization when several components share a deep tail.
-Tests compare density gradients to analytic Gaussian derivatives and survival
-gradients to an independent inverse Mills-ratio expansion at standardized times
-from 5,000 to 1,000,000, including the default scale floor. Identical components
-must produce zero weight-logit gradients. These checks do not imply stability
-for arbitrary parameter magnitudes.
 Neither branch subtracts a rounded CDF from one.
 Only observed patients evaluate the density contribution; only censored
 patients evaluate the survival contribution. This avoids multiplying unused
@@ -146,38 +142,32 @@ ordinary PyTorch initialization.
 Optional BatchNorm sits between each hidden linear layer and activation, with
 hidden linear biases disabled. BatchNorm training requires at least two
 patients per batch; singleton evaluation works. The default supports singleton
-training. The reference Survival-MDN network uses BatchNorm/PReLU, hard-clamps means
-and raw scales, and uses different numerical adjustments. This implementation
-uses stable formulas, a scale floor, optional BatchNorm, and unclamped output
-heads. These choices affect the resulting distributions and training behavior.
+training.
 
 ``model.mode`` is ``None``. ``Trainer.train`` consumes the custom scalar loss;
 ``Trainer.evaluate`` reports loss only. Monitor ``loss`` with
 ``monitor_criterion="min"`` and a short patience. Generic
 ``Trainer.inference()`` expects classification-style outputs and does not
 support this output contract; use ``predict_survival`` instead.
-Trainer averages validation losses by batch, which can differ from a patient
-mean for unequal batches. The synthetic example uses equal-size validation
-batches:
+Trainer averages validation losses by batch, so use equal-size validation
+batches when a per-patient validation mean is needed.
 
-.. code-block:: bash
+The self-contained synthetic walkthrough is
+``examples/survival_mdn_synthetic.ipynb``. It generates independent censoring
+and latent-mixture event times, trains on 256 patients, validates on 64, plots
+survival curves and mixture parameters, and checks exact checkpoint reload
+agreement. Setup instructions are in the notebook. CPU is the verified default.
 
-    python examples/survival_mdn_synthetic.py --epochs 2 --seed 0 --device cpu \
-        --output-dir /tmp/pyhealth-survival-mdn-smoke
+Paper and implementation differences
+-------------------------------------
 
-The example generates independent censoring and latent-mixture event times,
-trains on 256 patients, validates on 64, and uses batch size 32. It saves a
-grid, survival probabilities, constructor settings, and a state dictionary,
-and checks checkpoint reload equivalence. Reconstruct with the same settings
-and a compatible processed dataset; weights alone do not store configuration
-or processor metadata.
-
-For a cell-by-cell walkthrough, open
-``examples/survival_mdn_synthetic.ipynb`` in a notebook kernel with this checkout
-installed. It uses the script's synthetic data generator and adds plots of
-observed follow-up, patient survival curves, and component weights, followed
-by a checkpoint round trip. CPU is the verified default, including on Apple
-Silicon; MPS execution is not validated. Setup instructions are in the notebook.
+Section 5.4 of the paper describes exponential scale outputs. The authors'
+released code uses softplus, as does this model, with an added ``min_scale``
+floor. The released default network uses BatchNorm and clamps its outputs;
+this model makes BatchNorm optional and leaves the heads unclamped. These
+choices affect optimization. The controlled fixture below compares the
+conditional distributions at matched effective parameters, not trained-model
+or benchmark equivalence.
 
 Reference validation and reproduction
 -------------------------------------
@@ -211,176 +201,17 @@ In extreme tails, subtracting the CDF, exponential overflow, and the added
 epsilons can produce much larger reference discrepancies. Stable operations
 are retained rather than reproducing those numerical limitations.
 
-To reproduce, use a separate Python environment with PyTorch, NumPy, and
-lifelines installed, check out the reference at the revision in the fixture,
-and save the original harness below as ``/tmp/survival_mdn_reference.py``.
-From the PyHealth root run:
+To regenerate the fixture, check out the reference revision recorded in its
+provenance and use a separate environment with PyTorch, NumPy, and lifelines:
 
 .. code-block:: bash
 
-    python /tmp/survival_mdn_reference.py ../Survival-MDN \
+    python tools/generate_survival_mdn_reference.py ../Survival-MDN \
         tests/core/fixtures/survival_mdn_reference.json
 
-The harness loads only ``mdn_models.py`` and its dependencies. It extracts the
-single criterion function using AST; importing ``main.py`` would parse CLI
-arguments, load data, and launch training. This harness is documentation for
-external validation, not production or CI code:
-
-.. code-block:: python
-
-    """Original controlled validation harness; run outside PyHealth/normal CI."""
-
-    import ast
-    import importlib.util
-    import json
-    import math
-    import platform
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    import lifelines
-    import numpy
-    import torch
-
-    source, destination = map(Path, sys.argv[1:])
-    sys.path.insert(0, str(source.resolve()))
-    spec = importlib.util.spec_from_file_location(
-        "reference_mdn", source / "mdn_models.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    node = next(
-        n
-        for n in ast.parse((source / "main.py").read_text()).body
-        if isinstance(n, ast.FunctionDef) and n.name == "survival_loss"
-    )
-    scope = {"torch": torch, "sys": sys}
-    exec(
-        compile(ast.Module(body=[node], type_ignores=[]), "survival_loss_ast", "exec"),
-        scope,
-    )
-    inputs = {
-        "logits": [[0.2, -0.3, 0.7], [-0.6, 0.4, 0.1], [0.5, 0.0, -0.4]],
-        "means": [[-0.7, 0.4, 1.2], [-0.2, 0.8, 1.5], [-1.0, 0.2, 1.0]],
-        "scales": [[0.8, 1.0, 1.2], [1.1, 0.9, 0.7], [0.9, 1.3, 0.8]],
-        "duration": [0.5, 1.1, 2.0],
-        "event": [1.0, 0.0, 1.0],
-        "grid": [0.25, 0.75, 1.5, 2.5],
-        "min_scale": 0.0001,
-    }
-    t = {k: torch.tensor(v, dtype=torch.float64) for k, v in inputs.items()}
-    # Match effective standard deviations, not raw scale-head outputs.
-    raw = t["scales"] + torch.log(-torch.expm1(-t["scales"]))
-    params = torch.stack((t["logits"], t["means"], raw), dim=1)
-    dist = module.SurvivalMDN_Dist(params)
-    w, mu, sigma = dist.pred_params_to_parameters(params)
-    ld = dist.log_prob(t["duration"])
-    surv = 1 - dist.cdf(t["duration"])
-    grid = t["grid"].expand(3, -1)
-    sg = 1 - dist.cdf(grid)
-    criterion = scope["survival_loss"](
-        {"lambda": ld.exp() / surv, "Lambda": -(surv + 1e-6).log()}, t["event"]
-    )
-    nll = -(t["event"] * ld + (1 - t["event"]) * surv.log()).mean()
-
-
-    # Stable paper formulas, independently from the PyHealth implementation.
-    def stable(times):
-        z = times + torch.log(-torch.expm1(-times))
-        jac = -torch.log(-torch.expm1(-times))
-        m, s, weights = mu, sigma, w
-        if times.ndim == 2:
-            m, s, weights = mu[:, None], sigma[:, None], w[:, None]
-        a = (z[..., None] - m) / s
-        density = (
-            torch.logsumexp(
-                weights.log()
-                - s.log()
-                - 0.5 * a.square()
-                - 0.5 * math.log(2 * math.pi),
-                -1,
-            )
-            + jac
-        )
-        survival = torch.logsumexp(weights.log() + torch.special.log_ndtr(-a), -1)
-        return density, survival.exp(), survival
-
-
-    stable_ld, stable_s, stable_ls = stable(t["duration"])
-    _, stable_sg, _ = stable(grid)
-    stable_nll = -(t["event"] * stable_ld + (1 - t["event"]) * stable_ls).mean()
-
-
-    def plain(value):
-        return value.tolist() if isinstance(value, torch.Tensor) else value
-
-
-    result = {
-        "provenance": {
-            "repository": "https://github.com/XintianHan/Survival-MDN",
-            "revision": subprocess.check_output(
-                ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
-            ).strip(),
-            "paper": (
-                "Han, Goldstein, Ranganath (2022), "
-                "Survival Mixture Density Networks, PMLR 182"
-            ),
-            "dtype": "torch.float64",
-            "device": "cpu",
-            "python": platform.python_version(),
-            "torch": torch.__version__,
-            "numpy": numpy.__version__,
-            "lifelines": lifelines.__version__,
-            "criterion": (
-                "main.py survival_loss AST; "
-                "mean(-event*log(clamp(pdf/S,min=1e-8))-log(S+1e-6))"
-            ),
-            "command": (
-                "python /tmp/survival_mdn_reference.py ../Survival-MDN "
-                "tests/core/fixtures/survival_mdn_reference.json"
-            ),
-            "harness": (
-                "Original full source in "
-                "docs/api/models/pyhealth.models.SurvivalMDN.rst; no main.py import"
-            ),
-        },
-        "inputs": inputs,
-        "reference": {
-            k: plain(v)
-            for k, v in dict(
-                weights=w,
-                means=mu,
-                scales=sigma,
-                log_density=ld,
-                survival_at_duration=surv,
-                survival_grid=sg,
-                paper_nll=nll,
-                training_criterion=criterion,
-            ).items()
-        },
-        "stable": {
-            k: plain(v)
-            for k, v in dict(
-                log_density=stable_ld,
-                survival_at_duration=stable_s,
-                survival_grid=stable_sg,
-                paper_nll=stable_nll,
-            ).items()
-        },
-        "comparison": {
-            "max_abs_log_density": (ld - stable_ld).abs().max().item(),
-            "max_abs_survival_at_duration": (surv - stable_s).abs().max().item(),
-            "max_abs_survival_grid": (sg - stable_sg).abs().max().item(),
-            "abs_paper_nll": abs((nll - stable_nll).item()),
-            "criterion_minus_reference_paper_nll": (criterion - nll).item(),
-            "atol": 1e-4,
-            "rtol": 1e-4,
-        },
-    }
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(result, indent=2) + "\n")
-    print(json.dumps(result["comparison"], indent=2))
+The developer tool loads the reference distribution and extracts its training
+criterion without importing the training entry point. Normal tests use the
+saved fixture and require neither the reference checkout nor lifelines.
 
 References
 ----------

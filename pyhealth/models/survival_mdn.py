@@ -9,7 +9,6 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..datasets import SampleDataset
-from ..processors import TensorProcessor
 from .base_model import BaseModel
 
 
@@ -24,14 +23,14 @@ def _transformed_terms(times, log_weights, means, scales):
         scales = scales[:, None, :]
     else:
         raise ValueError("Internal times must have rank one or two.")
-    log_inverse_derivative = torch.log(-torch.expm1(-times))
-    latent = times + log_inverse_derivative
-    return latent, log_inverse_derivative, log_weights, means, scales
+    log_forward_derivative = torch.log(-torch.expm1(-times))
+    latent = times + log_forward_derivative
+    return latent, log_forward_derivative, log_weights, means, scales
 
 
 def _log_density(times, log_weights, means, scales):
     """Transformed mixture log density for strictly positive times."""
-    latent, log_inverse, weights, means, scales = _transformed_terms(
+    latent, log_forward, weights, means, scales = _transformed_terms(
         times, log_weights, means, scales
     )
     standardized = (latent - means) / scales
@@ -42,7 +41,7 @@ def _log_density(times, log_weights, means, scales):
     return (
         torch.logsumexp(weights + (normal - offset), dim=-1)
         + offset[..., 0]
-        - log_inverse[..., 0]
+        - log_forward[..., 0]
     )
 
 
@@ -59,18 +58,13 @@ def _log_survival(times, log_weights, means, scales):
     component = torch.empty_like(standardized)
     a = standardized[right]
     component[right] = (
-        -0.5 * a.square()
-        + torch.special.erfcx(a / math.sqrt(2)).log()
-        - math.log(2)
+        -0.5 * a.square() + torch.special.erfcx(a / math.sqrt(2)).log() - math.log(2)
     )
     component[~right] = torch.special.log_ndtr(-standardized[~right])
     # Center before adding weights so huge tail log probabilities do not
     # erase their relative weights, or the normalization in backward.
     offset = component.max(dim=-1, keepdim=True).values.detach()
-    return (
-        torch.logsumexp(weights + (component - offset), dim=-1)
-        + offset[..., 0]
-    )
+    return torch.logsumexp(weights + (component - offset), dim=-1) + offset[..., 0]
 
 
 class SurvivalMDN(BaseModel):
@@ -78,14 +72,14 @@ class SurvivalMDN(BaseModel):
 
     Models ``T = softplus(Z)`` with a feature-dependent Gaussian mixture for
     ``Z``. Features must be fixed-width finite floating vectors processed by a
-    fitted floating :class:`~pyhealth.processors.TensorProcessor`. The collator
+    fitted processor exposing floating vector metadata. The collator
     can pad ragged vectors, so ensure equal raw widths before processing.
     Scalar duration/event processors must expose a single ``value`` channel.
     Event 1 means observed; 0 means right censored. Durations must be positive,
     finite, and use the same units as prediction times. No scaling is implicit.
 
     Args:
-        dataset: Nonempty processed dataset with exactly the selected schemas.
+        dataset: Nonempty processed dataset containing the selected fields.
         feature_key: Dense vector input field. Selected field names must be
             distinct nonempty strings other than PyTorch's reserved ``self``.
         duration_key: Positive duration output field.
@@ -185,14 +179,13 @@ class SurvivalMDN(BaseModel):
         if dataset is None or len(dataset) == 0:
             raise ValueError("A nonempty processed dataset is required.")
         try:
-            if set(dataset.input_schema) != {feature_key} or set(
-                dataset.output_schema
-            ) != {duration_key, event_key}:
-                raise ValueError(
-                    "Dataset schemas must contain exactly the selected fields."
-                )
+            if feature_key not in dataset.input_schema or not {
+                duration_key,
+                event_key,
+            }.issubset(dataset.output_schema):
+                raise ValueError("Dataset schemas must contain the selected fields.")
             processor = dataset.input_processors[feature_key]
-            if not isinstance(processor, TensorProcessor) or not (
+            if not (
                 processor.dtype.is_floating_point
                 and processor.schema() == ("value",)
                 and processor.dim() == (1,)
@@ -200,7 +193,7 @@ class SurvivalMDN(BaseModel):
                 and processor.size() > 0
             ):
                 raise ValueError(
-                    "Features require a fitted floating vector TensorProcessor."
+                    "Features require fitted floating vector processor metadata."
                 )
             width = processor.size()
             for key in (duration_key, event_key):
@@ -247,14 +240,16 @@ class SurvivalMDN(BaseModel):
             raise TypeError(f"{name} must be a raw tensor, not a tuple/list.")
         if floating and not value.is_floating_point():
             raise TypeError(f"{name} must be a floating tensor.")
-        if value.is_complex() or not torch.isfinite(value).all():
-            raise ValueError(f"{name} must contain finite real values.")
+        if value.is_complex():
+            raise ValueError(f"{name} must contain real values.")
         weight = self.weight_head.weight
         if weight.dtype not in (torch.float32, torch.float64):
             raise TypeError("Model dtype must be float32 or float64.")
         value = value.to(device=weight.device, dtype=weight.dtype)
         if not torch.isfinite(value).all():
-            raise ValueError(f"{name} exceeds the model dtype numerical range.")
+            raise ValueError(
+                f"{name} must be finite within the model dtype numerical range."
+            )
         return value
 
     def _parameters_from_features(self, kwargs):
@@ -275,9 +270,9 @@ class SurvivalMDN(BaseModel):
             "means": self.mean_head(hidden),
             "scales": F.softplus(self.scale_head(hidden)) + self.min_scale,
         }
-        if (
-            any(not torch.isfinite(value).all() for value in outputs.values())
-            or (outputs["scales"] <= 0).any()
+        if not (
+            torch.isfinite(torch.stack(tuple(outputs.values()))).all()
+            & (outputs["scales"] > 0).all()
         ):
             raise ValueError(
                 "Predicted parameters exceed the supported numerical range."
@@ -333,10 +328,6 @@ class SurvivalMDN(BaseModel):
                     outputs[key][selected] for key in ("log_weights", "means", "scales")
                 ]
                 likelihood = helper(duration[selected], *parameters)
-                if not torch.isfinite(likelihood).all():
-                    raise ValueError(
-                        "Selected log likelihood exceeds the numerical range."
-                    )
                 contributions.append((likelihood / batch_size).sum())
         # Divide before summing to avoid overflow in a representable mean.
         outputs["loss"] = -torch.stack(contributions).sum()
@@ -344,9 +335,7 @@ class SurvivalMDN(BaseModel):
             raise ValueError("Mean loss exceeds the supported numerical range.")
         return outputs
 
-    def predict_survival(
-        self, times: torch.Tensor, /, **kwargs: Any
-    ) -> torch.Tensor:
+    def predict_survival(self, times: torch.Tensor, /, **kwargs: Any) -> torch.Tensor:
         """Return differentiable [B, T] survival probabilities on a shared grid.
 
         Args:

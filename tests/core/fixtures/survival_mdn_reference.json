@@ -10,8 +10,8 @@
     "numpy": "2.5.4",
     "lifelines": "0.30.3",
     "criterion": "main.py survival_loss AST; mean(-event*log(clamp(pdf/S,min=1e-8))-log(S+1e-6))",
-    "command": "python /tmp/survival_mdn_reference.py ../Survival-MDN tests/core/fixtures/survival_mdn_reference.json",
-    "harness": "Original full source in docs/api/models/pyhealth.models.SurvivalMDN.rst; no main.py import"
+    "command": "python tools/generate_survival_mdn_reference.py ../Survival-MDN tests/core/fixtures/survival_mdn_reference.json",
+    "harness": "Original full source in tools/generate_survival_mdn_reference.py; no main.py import"
   },
   "inputs": {
     "logits": [

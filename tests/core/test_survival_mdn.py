@@ -533,12 +533,53 @@ class TestSurvivalMDN(unittest.TestCase):
             ):
                 SurvivalMDN(self.dataset, **kwargs)
 
+    def test_extra_fields_and_compatible_custom_processor(self):
+        class CompatibleProcessor:
+            """Expose the same numeric contract without TensorProcessor inheritance."""
+
+            def __init__(self, delegate):
+                self.delegate = delegate
+
+            def __getattr__(self, name):
+                return getattr(self.delegate, name)
+
+        samples = [
+            {
+                "patient_id": f"p{i}",
+                "features": [0.2 + i, -0.5],
+                "extra": [float(i)],
+                "duration": 0.5 + i,
+                "event": float(i % 2),
+                "other_label": float(i),
+            }
+            for i in range(4)
+        ]
+        dataset = create_sample_dataset(
+            samples,
+            {"features": "tensor", "extra": "tensor"},
+            {"duration": "tensor", "event": "tensor", "other_label": "tensor"},
+            in_memory=True,
+        )
+        dataset.input_processors["features"] = CompatibleProcessor(
+            dataset.input_processors["features"]
+        )
+        model = SurvivalMDN(dataset, hidden_dims=(4,), n_components=2).eval()
+        batch = _batch(dataset)
+        output = model(**batch)
+        output["loss"].backward()
+        changed = dict(
+            batch,
+            extra=torch.full((4, 1), float("nan")),
+            other_label=torch.full((4,), float("nan")),
+        )
+        torch.testing.assert_close(output["loss"], model(**changed)["loss"])
+        self.assertIsNone(model.mode)
+
     def test_invalid_dataset_metadata(self):
         for dataset in (None, []):
             with self.subTest(dataset=dataset), self.assertRaises(ValueError):
                 SurvivalMDN(dataset)
         for mutate in (
-            lambda d: d.input_schema.update(extra="tensor"),
             lambda d: d.output_schema.pop("duration"),
             lambda d: d.input_processors.pop("features"),
             lambda d: d.input_processors.update(features=TensorProcessor()),
@@ -662,6 +703,14 @@ class TestSurvivalMDN(unittest.TestCase):
             event=self.batch["event"][:, None].bool(),
         )
         torch.testing.assert_close(output["loss"], self.model(**columns)["loss"])
+
+    def test_scale_floor_underflow_fails_clearly(self):
+        model = SurvivalMDN(self.dataset, min_scale=1e-300)
+        with torch.no_grad():
+            model.scale_head.weight.zero_()
+            model.scale_head.bias.fill_(-1000)
+        with self.assertRaisesRegex(ValueError, "numerical range"):
+            model(features=self.batch["features"])
 
     def test_nonfinite_parameters_and_selected_likelihood_fail_clearly(self):
         with torch.no_grad():
