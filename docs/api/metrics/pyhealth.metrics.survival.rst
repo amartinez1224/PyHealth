@@ -135,30 +135,31 @@ are computed on the full cohort, not per-batch averages.
 These metrics characterize this PyHealth baseline; enabling them does not
 reproduce the paper's tuned benchmark. The adapter's architecture, numerical
 choices, sampler, optimizer, and training configuration remain as documented in
-the [SUPPORT baseline guide](../../../examples/survival_mdn_support_README.md).
+the `SUPPORT baseline guide <../../../examples/survival_mdn_support_README.md>`_.
 
 .. code-block:: python
 
     import numpy as np
     from pyhealth.metrics import survival_metrics_fn
 
-  with np.load(
-    "output/support-baseline-metrics/test_metric_predictions.npz",
-    allow_pickle=False,
-  ) as p:
+    with np.load(
+        "output/support-baseline-metrics/test_metric_predictions.npz",
+        allow_pickle=False,
+    ) as p:
         scores = {
             str(cutoff): survival_metrics_fn(
                 p["duration"], p["event"], p["survival"], p["times"],
                 censoring_threshold=cutoff,
+                integration_steps=1000,
             )
             for cutoff in (1e-8, 0.2, 0.4)
         }
 
-      The adapter passes ``integration_steps=1000`` to both grid generation and
-      scoring. Its direct predictions use the helper grid rather than interpolating
-      the 128-point visualization curves. Grid construction uses test labels only to
-      set evaluation query times; these labels and test scores are never fed into
-      training or checkpoint selection.
+The adapter passes ``integration_steps=1000`` to both grid generation and
+scoring. Its direct predictions use the helper grid rather than interpolating
+the 128-point visualization curves. Grid construction uses test labels only to
+set evaluation query times; these labels and test scores are never fed into
+training or checkpoint selection.
 
 Direct predictions on required times
 ------------------------------------
