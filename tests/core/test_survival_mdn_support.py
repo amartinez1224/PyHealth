@@ -233,6 +233,22 @@ class TestSupportLoader(unittest.TestCase):
                 else:
                     np.testing.assert_array_equal(result["survival"][:, 0], 1)
 
+    def test_float64_grid_values_collapsing_in_float32(self):
+        datasets = support.load_support_split(self.data)["datasets"]
+        model = SurvivalMDN(datasets["train"], **support.MODEL_CONFIG)
+        grid = np.array([0.0, 0.1, 0.1 + 1e-10, 0.5], dtype=np.float64)
+        self.assertLess(grid[1], grid[2])
+        self.assertEqual(np.float32(grid[1]), np.float32(grid[2]))
+
+        predictions = support._predict(model, datasets["test"], grid)
+
+        self.assertEqual(predictions["survival"].shape, (5, len(grid)))
+        np.testing.assert_array_equal(predictions["times"], grid)
+        self.assertEqual(predictions["times"].dtype, np.float64)
+        np.testing.assert_array_equal(
+            predictions["survival"][:, 1], predictions["survival"][:, 2]
+        )
+
     def test_prediction_rejects_invalid_grids(self):
         invalid_grids = (
             np.array([]),
@@ -243,7 +259,6 @@ class TestSupportLoader(unittest.TestCase):
             np.array([1.0, 0.5]),
             np.array([0.0, np.inf]),
             np.array(["0", "1"]),
-            np.array([0.0, 1e100]),
         )
         for grid in invalid_grids:
             with self.subTest(grid=grid), self.assertRaises(ValueError):
@@ -476,7 +491,7 @@ class TestSupportLoader(unittest.TestCase):
         self.assertEqual(metric_metadata["cutoffs"], [1e-8, 0.2, 0.4])
         self.assertEqual(metric_metadata["integration_steps"], 1000)
         self.assertEqual(metric_metadata["prediction_dtype"], "float32")
-        self.assertEqual(metric_metadata["time_dtype"], "float32")
+        self.assertEqual(metric_metadata["time_dtype"], "float64")
         self.assertTrue(metric_metadata["replay_agreed"])
         with np.load(output / "test_predictions.npz", allow_pickle=False) as legacy:
             self.assertEqual(legacy["times"].shape, (128,))

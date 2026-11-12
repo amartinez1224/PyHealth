@@ -199,19 +199,16 @@ def _predict(model, dataset, grid):
         raise ValueError(
             "grid must be a nonempty, finite, nonnegative, strictly increasing 1-D array"
         )
-    with np.errstate(over="ignore", invalid="ignore"):
-        grid = grid.astype(np.float32)
-    if not np.isfinite(grid).all() or (np.diff(grid) <= 0).any():
-        raise ValueError("grid must remain finite and strictly increasing in float32")
     if len(dataset) == 0:
         raise ValueError("dataset must be nonempty")
+    query_times = torch.as_tensor(grid, dtype=torch.float64)
     model.eval()
     curves, indices, identifiers = [], [], []
     with torch.no_grad():
         for batch in get_dataloader(dataset, batch_size=256, shuffle=False):
             curves.append(
                 model.predict_survival(
-                    torch.from_numpy(grid), features=batch["features"]
+                    query_times, features=batch["features"]
                 ).numpy()
             )
             indices.extend(batch["source_row_index"])
