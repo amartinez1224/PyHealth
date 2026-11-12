@@ -90,6 +90,12 @@ class SurvivalMDN(BaseModel):
         batch_norm: Normalize hidden layers before activation. Training batches
             then need at least two patients; singleton evaluation is supported.
         min_scale: Finite positive floor added to softplus scale outputs.
+        weight_mode: How mixture weights are produced; means and scales are
+            always patient-specific. ``"patient"`` (default) predicts weights
+            from each patient's features. ``"shared"`` learns one weight vector
+            used for every patient. ``"uniform"`` fixes every weight to ``1/K``
+            and has no weight parameters. The last two modes exist for ablation
+            studies of patient-specific weights.
 
     Notes:
         Mean head weights start at zero and biases at evenly spaced centers
@@ -140,6 +146,7 @@ class SurvivalMDN(BaseModel):
         activation: str = "prelu",
         batch_norm: bool = False,
         min_scale: float = 1e-4,
+        weight_mode: str = "patient",
     ) -> None:
         keys = (feature_key, duration_key, event_key)
         if any(not isinstance(key, str) or not key for key in keys):
@@ -169,6 +176,8 @@ class SurvivalMDN(BaseModel):
             raise ValueError("n_components must be a positive integer.")
         if activation not in ("prelu", "relu"):
             raise ValueError("activation must be 'prelu' or 'relu'.")
+        if weight_mode not in ("patient", "shared", "uniform"):
+            raise ValueError("weight_mode must be 'patient', 'shared' or 'uniform'.")
         if (
             isinstance(min_scale, bool)
             or not isinstance(min_scale, (int, float))
@@ -216,6 +225,8 @@ class SurvivalMDN(BaseModel):
         self.input_width = width
         self.batch_norm = batch_norm
         self.min_scale = min_scale
+        self.weight_mode = weight_mode
+        self.n_components = n_components
         layers = []
         for hidden_width in hidden_dims:
             layers.append(nn.Linear(width, hidden_width, bias=not batch_norm))
@@ -224,7 +235,11 @@ class SurvivalMDN(BaseModel):
             layers.append(nn.PReLU() if activation == "prelu" else nn.ReLU())
             width = hidden_width
         self.hidden = nn.Sequential(*layers)
-        self.weight_head = nn.Linear(width, n_components)
+        # Only create weight parameters for the chosen mode.
+        if weight_mode == "patient":
+            self.weight_head = nn.Linear(width, n_components)
+        elif weight_mode == "shared":
+            self.shared_weight_logits = nn.Parameter(torch.zeros(n_components))
         self.mean_head = nn.Linear(width, n_components)
         self.scale_head = nn.Linear(width, n_components)
         nn.init.zeros_(self.mean_head.weight)
@@ -242,15 +257,31 @@ class SurvivalMDN(BaseModel):
             raise TypeError(f"{name} must be a floating tensor.")
         if value.is_complex():
             raise ValueError(f"{name} must contain real values.")
-        weight = self.weight_head.weight
-        if weight.dtype not in (torch.float32, torch.float64):
+        # Use mean_head because weight_head does not exist in every mode.
+        reference = self.mean_head.weight
+        if reference.dtype not in (torch.float32, torch.float64):
             raise TypeError("Model dtype must be float32 or float64.")
-        value = value.to(device=weight.device, dtype=weight.dtype)
+        value = value.to(device=reference.device, dtype=reference.dtype)
         if not torch.isfinite(value).all():
             raise ValueError(
                 f"{name} must be finite within the model dtype numerical range."
             )
         return value
+
+    def _log_weights(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Return [B, K] mixture log weights for the configured weight mode."""
+        batch_size = hidden.shape[0]
+        if self.weight_mode == "patient":
+            return F.log_softmax(self.weight_head(hidden), dim=-1)
+        if self.weight_mode == "shared":
+            shared = F.log_softmax(self.shared_weight_logits, dim=-1)
+            return shared.to(hidden.dtype).expand(batch_size, -1)
+        return torch.full(
+            (batch_size, self.n_components),
+            -math.log(self.n_components),
+            dtype=hidden.dtype,
+            device=hidden.device,
+        )
 
     def _parameters_from_features(self, kwargs):
         if self.feature_key not in kwargs:
@@ -266,7 +297,7 @@ class SurvivalMDN(BaseModel):
             )
         hidden = self.hidden(features)
         outputs = {
-            "log_weights": F.log_softmax(self.weight_head(hidden), dim=-1),
+            "log_weights": self._log_weights(hidden),
             "means": self.mean_head(hidden),
             "scales": F.softplus(self.scale_head(hidden)) + self.min_scale,
         }
