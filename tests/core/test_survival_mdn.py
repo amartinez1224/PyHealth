@@ -816,5 +816,101 @@ class TestSurvivalIntegration(unittest.TestCase):
             trainer.load_ckpt(path)
 
 
+class TestWeightModes(unittest.TestCase):
+    """Mixture-weight ablation modes on tiny synthetic tensors."""
+
+    MODES = ("patient", "shared", "uniform")
+    N_COMPONENTS = 3
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dataset = _dataset()
+        cls.batch = _batch(cls.dataset)
+
+    def _model(self, mode):
+        torch.manual_seed(5)
+        return SurvivalMDN(
+            self.dataset,
+            hidden_dims=(8, 6),
+            n_components=self.N_COMPONENTS,
+            weight_mode=mode,
+        )
+
+    def test_default_mode_is_patient(self):
+        model = SurvivalMDN(self.dataset, hidden_dims=(4,))
+        self.assertEqual(model.weight_mode, "patient")
+        self.assertTrue(hasattr(model, "weight_head"))
+
+    def test_forward_shapes_and_weights_sum_to_one(self):
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                output = self._model(mode)(**self.batch)
+                for name in ("log_weights", "means", "scales"):
+                    self.assertEqual(output[name].shape, (4, 3))
+                torch.testing.assert_close(
+                    output["log_weights"].exp().sum(-1), torch.ones(4)
+                )
+                self.assertEqual(output["loss"].shape, ())
+                self.assertTrue(torch.isfinite(output["loss"]))
+
+    def test_uniform_weights_and_no_weight_parameters(self):
+        model = self._model("uniform")
+        output = model(**self.batch)
+        torch.testing.assert_close(
+            output["log_weights"].exp(), torch.full((4, 3), 1 / 3)
+        )
+        self.assertFalse(hasattr(model, "weight_head"))
+        names = [name for name, _ in model.named_parameters()]
+        self.assertFalse(
+            any("weight_head" in name or "shared" in name for name in names)
+        )
+
+    def test_shared_weights_identical_across_patients(self):
+        model = self._model("shared")
+        with torch.no_grad():
+            model.shared_weight_logits.copy_(torch.tensor([0.5, -1.0, 2.0]))
+        weights = model(features=self.batch["features"])["log_weights"]
+        torch.testing.assert_close(weights, weights[:1].expand(4, -1))
+        expected = torch.tensor([0.5, -1.0, 2.0]).log_softmax(-1)
+        torch.testing.assert_close(weights[0], expected)
+        self.assertFalse(hasattr(model, "weight_head"))
+
+    def test_patient_weights_vary_across_patients(self):
+        weights = self._model("patient")(features=self.batch["features"])
+        self.assertFalse(
+            torch.allclose(weights["log_weights"], weights["log_weights"][:1])
+        )
+
+    def test_gradients_reach_expected_parameters(self):
+        for mode in ("shared", "uniform"):
+            with self.subTest(mode=mode):
+                model = self._model(mode)
+                model(**self.batch)["loss"].backward()
+                for head in (model.mean_head, model.scale_head):
+                    self.assertGreater(head.bias.grad.abs().sum(), 0)
+                if mode == "shared":
+                    self.assertGreater(model.shared_weight_logits.grad.abs().sum(), 0)
+
+    def test_parameter_counts_differ_only_by_weight_parameters(self):
+        counts = {
+            mode: sum(p.numel() for p in self._model(mode).parameters())
+            for mode in self.MODES
+        }
+        self.assertEqual(counts["shared"] - counts["uniform"], self.N_COMPONENTS)
+        self.assertGreater(counts["patient"], counts["shared"])
+
+    def test_predict_survival_and_dtype_conversion_without_weight_head(self):
+        model = self._model("uniform").double()
+        times = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
+        curves = model.eval().predict_survival(times, features=self.batch["features"])
+        self.assertEqual(curves.shape, (4, 3))
+        self.assertEqual(curves.dtype, torch.float64)
+
+    def test_invalid_weight_mode_raises(self):
+        for bad in ("Patient", "", "none", None, 1):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                SurvivalMDN(self.dataset, weight_mode=bad)
+
+
 if __name__ == "__main__":
     unittest.main()
