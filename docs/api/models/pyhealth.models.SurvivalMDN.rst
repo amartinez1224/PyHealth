@@ -3,9 +3,9 @@ pyhealth.models.SurvivalMDN
 
 ``SurvivalMDN`` models a positive, continuous event time from one dense feature
 vector per patient. It supports right censoring: ``event=1`` means the event
-was observed; ``event=0`` means observation ended before the event. Its mixture
-weights, Gaussian means, and Gaussian standard deviations all depend on the
-patient. Interval censoring, competing risks, survival metrics, and clinical
+was observed; ``event=0`` means observation ended before the event. By default
+its mixture weights, Gaussian means, and Gaussian standard deviations all depend
+on the patient; ``weight_mode`` can ablate the weights (see below). Interval censoring, competing risks, survival metrics, and clinical
 dataset preprocessing are outside this initial implementation.
 
 Data and prediction contract
@@ -145,6 +145,22 @@ Only observed patients evaluate the density contribution; only censored
 patients evaluate the survival contribution. This avoids multiplying unused
 infinite terms by zero. A continuous density may exceed one, so negative mean
 negative log likelihood is valid.
+
+Mixture weight modes
+--------------------
+
+The ``weight_mode`` constructor argument controls only the mixture weights.
+Means and scales are patient-specific in every mode.
+
+* ``"patient"`` (default): a linear head on the hidden features predicts the
+  weight logits, followed by ``log_softmax``. This is the original behavior.
+* ``"shared"``: one learned vector of ``K`` logits, initialized to zero, is
+  passed through ``log_softmax`` and repeated for every patient.
+* ``"uniform"``: every weight is fixed at ``1/K``. The model has no weight
+  parameters and no ``weight_head``.
+
+Any other value raises ``ValueError``. ``examples/support_survival_prediction_survival_mdn.py``
+runs the three modes against each other on SUPPORT.
 
 Architecture and training
 -------------------------
