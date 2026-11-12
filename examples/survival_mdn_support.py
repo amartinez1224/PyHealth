@@ -489,6 +489,8 @@ def main(argv=None):
             np.array_equal(metric_predictions[key], repeated_metric_predictions[key])
             for key in metric_predictions
         )
+        if not metric_replay_agreed:
+            raise AssertionError("Metric predictions or scores differ after checkpoint reload")
         source_run_agreed = None
         if saved_metric_evaluation is not None:
             source_prediction_path = (

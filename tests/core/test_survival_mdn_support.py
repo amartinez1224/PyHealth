@@ -268,9 +268,9 @@ class TestSupportLoader(unittest.TestCase):
         datasets = support.load_support_split(self.data)["datasets"]
         dataset = datasets["test"]
         helper_grids = (
-            np.array([0.0, 0.5, 1.0]),
-            np.array([0.25, 0.75, 1.25]),
-            np.array([0.5, 1.0, 1.5]),
+            np.array([0.0, 0.5, 1.0], dtype=np.float64),
+            np.array([0.25, 0.5 + 1e-10, 1.25], dtype=np.float64),
+            np.array([0.5, 1.0, 1.5], dtype=np.float64),
         )
         helper_calls = []
 
@@ -283,6 +283,7 @@ class TestSupportLoader(unittest.TestCase):
                 return self
 
             def predict_survival(self, times, *, features):
+                times = times.to(torch.float32)
                 return torch.exp(-times[None, :].expand(len(features), -1))
 
         score_calls = []
@@ -305,7 +306,10 @@ class TestSupportLoader(unittest.TestCase):
             [dataset[i]["event"].item() for i in range(len(dataset))],
             dtype=np.float32,
         )
-        expected_times = np.unique(np.concatenate(helper_grids)).astype(np.float32)
+        expected_times = np.unique(np.concatenate(helper_grids))
+        self.assertEqual(expected_times.dtype, np.float64)
+        self.assertNotEqual(expected_times[2], expected_times[3])
+        self.assertEqual(np.float32(expected_times[2]), np.float32(expected_times[3]))
         self.assertEqual(len(helper_calls), 3)
         for index, (duration, event, kwargs) in enumerate(helper_calls):
             np.testing.assert_array_equal(duration, expected_duration)
@@ -314,6 +318,10 @@ class TestSupportLoader(unittest.TestCase):
             self.assertEqual(kwargs["integration_steps"], 1000)
         self.assertEqual(predictions["survival"].shape, (len(dataset), len(expected_times)))
         np.testing.assert_array_equal(predictions["times"], expected_times)
+        self.assertEqual(predictions["times"].dtype, np.float64)
+        np.testing.assert_array_equal(
+            predictions["survival"][:, 2], predictions["survival"][:, 3]
+        )
         np.testing.assert_array_equal(predictions["duration"], expected_duration)
         np.testing.assert_array_equal(predictions["event"], expected_event)
         np.testing.assert_array_equal(predictions["source_row_index"], np.arange(len(dataset)))
@@ -331,6 +339,7 @@ class TestSupportLoader(unittest.TestCase):
             np.testing.assert_array_equal(event, expected_event)
             np.testing.assert_array_equal(survival, predictions["survival"])
             np.testing.assert_array_equal(times, predictions["times"])
+            self.assertEqual(times.dtype, np.float64)
             self.assertEqual(kwargs["censoring_threshold"], (1e-8, 0.2, 0.4)[index])
             self.assertEqual(kwargs["integration_steps"], 1000)
         json.dumps(report, allow_nan=False)
@@ -445,6 +454,32 @@ class TestSupportLoader(unittest.TestCase):
                 ]
             )
         self.assertFalse((self.root / "bad-replay").exists())
+
+    def test_metric_reload_mismatch_does_not_write_artifacts(self):
+        output = self.root / "metric-mismatch"
+        evaluate = support._evaluate_metrics
+        calls = []
+
+        def mismatch_on_reload(model, dataset):
+            predictions, report = evaluate(model, dataset)
+            calls.append(True)
+            if len(calls) == 2:
+                predictions["survival"] = predictions["survival"].copy()
+                predictions["survival"][0, 0] += 0.01
+            return predictions, report
+
+        with (
+            patch.object(support, "_evaluate_metrics", side_effect=mismatch_on_reload),
+            self.assertRaisesRegex(AssertionError, "differ after checkpoint reload"),
+        ):
+            support.main([
+                "--data-dir", str(self.data), "--epochs", "1", "--output-dir",
+                str(output), "--evaluate-metrics",
+            ])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue((output / "test_predictions.npz").is_file())
+        for name in ("test_metric_predictions.npz", "test_metrics.json", "manifest.json"):
+            self.assertFalse((output / name).exists())
 
     def test_evaluate_metrics_cli_smoke(self):
         output = self.root / "metric-run"
