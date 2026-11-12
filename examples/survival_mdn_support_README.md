@@ -146,9 +146,10 @@ against prediction-only replay. Individual-row plots are disabled by default.
 
 The notebook defaults to the existing `output/support-baseline` run. Set its
 local data/run paths in setup, or explicitly enable `RUN_TRAINING` to train into
-a fresh directory. Replay always gets a fresh output directory. No downloads or
-metrics are added. Use the documented Jupyter kernel setup, and clear outputs
-before committing or sharing; keep executed notebooks and run artifacts local.
+a fresh directory. Replay always gets a fresh output directory. Metrics are
+opt-in in the command-line adapter. Use the documented Jupyter kernel setup,
+and clear outputs before committing or sharing; keep executed notebooks and run
+artifacts local.
 
 Notebook verification executed all eight code cells in both existing-run and
 fresh-training modes, including optional individual-row plotting in the local
@@ -164,14 +165,23 @@ From the PyHealth repository root, using a compatible installed Python:
 ```bash
 python examples/survival_mdn_support.py --data-dir ../Survival-MDN/data/support --split 1 --seed 0 --epochs 2 --output-dir output/support-smoke
 python examples/survival_mdn_support.py --data-dir ../Survival-MDN/data/support --split 1 --seed 0 --output-dir output/support-baseline
+python examples/survival_mdn_support.py --data-dir ../Survival-MDN/data/support --split 1 --seed 0 --output-dir output/support-baseline-metrics --evaluate-metrics
 python examples/survival_mdn_support.py --data-dir ../Survival-MDN/data/support --split 1 --seed 0 --output-dir output/support-repeat
 python examples/survival_mdn_support.py --data-dir ../Survival-MDN/data/support --predict-only output/support-baseline --output-dir output/support-reloaded
+python examples/survival_mdn_support.py --data-dir ../Survival-MDN/data/support --predict-only output/support-baseline-metrics --output-dir output/support-metrics-reloaded --evaluate-metrics
 ```
 
 Use a new/empty output directory for each run. Prediction-only mode uses the
 saved split, seed, model settings, units, and exact grid, verifies source archive
 hashes/metadata, reconstructs compatible tensor processors, and copies the
-selected checkpoint into the new output directory. It never trains.
+selected checkpoint into the new output directory. It never trains. The
+`--evaluate-metrics` flag applies only to that invocation: replay with the flag
+regenerates metric predictions and scores in its new output directory; replay
+without it writes no metric artifacts and removes any inherited metric metadata
+from the replay manifest. When the source manifest contains metric metadata,
+replay requires exact agreement with its metric prediction arrays and report.
+An older source manifest without metric metadata is supported; its replay marks
+the source-run comparison unavailable.
 
 A run produces:
 
@@ -187,6 +197,15 @@ A run produces:
   ordinary Unicode `record_id`, and `partition`. Load with `allow_pickle=False`.
   Arrays retain archive test-row order; labels are exported only for later
   evaluation.
+- With `--evaluate-metrics`, `test_metric_predictions.npz` stores the same
+  labels and row metadata with `survival [N_test, T_metric]` and `times
+  [T_metric]`; `T_metric` is the number of sorted unique required evaluation
+  times. `test_metrics.json` stores C-index, integrated Brier score (IBS), and
+  integrated binomial log-likelihood (IBLL) for each censoring cutoff, along
+  with protocol, dtype, time-unit, and sample/time-count metadata. The manifest's
+  `metric_evaluation` entry records artifact names, cutoffs, integration steps,
+  protocol/dtypes, and checkpoint/source replay agreement. The original
+  `prediction_grid` and 128-point `test_predictions.npz` are unchanged.
 
 The float32 grid is `linspace(0, max(transformed_training_duration), 128)`,
 computed from training alone and saved exactly. It demonstrates prediction;
@@ -195,6 +214,24 @@ batched in groups of at most 256 in eval/no-grad mode, with features only.
 Every run checks row coverage/order, shape, finite probabilities, [0, 1] bounds,
 nonincreasing curves within `1e-6`, and exact ones at zero. It reloads the best
 checkpoint into a fresh model and requires exact agreement for all test rows.
+
+Metric evaluation is opt-in and happens after the selected checkpoint has been
+restored. It predicts on the sorted unique union of the times required for
+censoring cutoffs `1e-8`, `0.2`, and `0.4`; each cutoff uses 1,000 integration
+points. This is separate from the baseline's 128-point curve. Inference is CPU
+float32, so query times returned by the metric grid are rounded to float32
+before model evaluation. Do not expect bitwise identity with a float64 query.
+
+C-index and IBLL are higher-is-better; IBS is lower-is-better. IBLL is a signed
+log-likelihood and is usually negative, not a positive loss to negate. The
+censoring Kaplan-Meier estimate is fitted on the complete test evaluation
+partition. Test labels determine the metric evaluation times and censoring
+estimates, but are not passed to training, validation, checkpoint selection,
+or model inference. Scores are computed once per cutoff on the full cohort,
+never per batch. These protocol-specific metrics do not turn this PyHealth
+baseline into a reproduction of the paper's tuned benchmark: the architecture,
+initialization, numerical details, sampler, optimizer, and training choices
+described above remain different.
 
 ## Offline validation
 
