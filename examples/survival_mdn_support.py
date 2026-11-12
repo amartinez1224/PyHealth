@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from pyhealth.datasets import create_sample_dataset, get_dataloader
+from pyhealth.metrics import survival_evaluation_grid, survival_metrics_fn
 from pyhealth.models import SurvivalMDN
 from pyhealth.trainer import Trainer
 
@@ -186,6 +187,24 @@ def _grid(train):
 
 
 def _predict(model, dataset, grid):
+    grid = np.asarray(grid)
+    if (
+        grid.dtype.kind not in "iuf"
+        or grid.ndim != 1
+        or grid.size == 0
+        or not np.isfinite(grid).all()
+        or (grid < 0).any()
+        or (np.diff(grid) <= 0).any()
+    ):
+        raise ValueError(
+            "grid must be a nonempty, finite, nonnegative, strictly increasing 1-D array"
+        )
+    with np.errstate(over="ignore", invalid="ignore"):
+        grid = grid.astype(np.float32)
+    if not np.isfinite(grid).all() or (np.diff(grid) <= 0).any():
+        raise ValueError("grid must remain finite and strictly increasing in float32")
+    if len(dataset) == 0:
+        raise ValueError("dataset must be nonempty")
     model.eval()
     curves, indices, identifiers = [], [], []
     with torch.no_grad():
@@ -202,11 +221,11 @@ def _predict(model, dataset, grid):
     if indices != list(range(len(dataset))) or identifiers != expected_ids:
         raise AssertionError("Prediction rows lost, repeated, or reordered")
     if (
-        survival.shape != (len(dataset), 128)
+        survival.shape != (len(dataset), len(grid))
         or not np.isfinite(survival).all()
         or not ((survival >= 0) & (survival <= 1)).all()
         or not (np.diff(survival, axis=1) <= 1e-6).all()
-        or not (survival[:, 0] == 1).all()
+        or not (survival[:, grid == 0] == 1).all()
     ):
         raise AssertionError("Invalid survival curves")
     return {
@@ -226,6 +245,72 @@ def _predict(model, dataset, grid):
         "record_id": np.asarray(identifiers, dtype=str),
         "partition": np.full(len(dataset), "test"),
     }
+
+
+def _evaluate_metrics(model, dataset):
+    duration = np.asarray(
+        [dataset[i]["duration"].item() for i in range(len(dataset))],
+        dtype=np.float32,
+    )
+    event = np.asarray(
+        [dataset[i]["event"].item() for i in range(len(dataset))],
+        dtype=np.float32,
+    )
+    cutoffs = (1e-8, 0.2, 0.4)
+    integration_steps = 1000
+    grids = []
+    for cutoff in cutoffs:
+        try:
+            grids.append(
+                survival_evaluation_grid(
+                    duration,
+                    event,
+                    censoring_threshold=cutoff,
+                    integration_steps=integration_steps,
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Survival metrics undefined at censoring cutoff {cutoff}: {exc}"
+            ) from exc
+    grid = np.unique(np.concatenate(grids))
+    predictions = _predict(model, dataset, grid)
+    scores_by_cutoff = []
+    for cutoff in cutoffs:
+        try:
+            scores = survival_metrics_fn(
+                duration,
+                event,
+                predictions["survival"],
+                predictions["times"],
+                censoring_threshold=cutoff,
+                integration_steps=integration_steps,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Survival metrics undefined at censoring cutoff {cutoff}: {exc}"
+            ) from exc
+        scores_by_cutoff.append(
+            {
+                "cutoff": cutoff,
+                "integration_steps": integration_steps,
+                "dtype": "float32",
+                "time_unit": UNITS,
+                "sample_count": len(dataset),
+                "time_count": len(grid),
+                "scores": scores,
+            }
+        )
+    report = {
+        "protocol": "Survival-MDN/SODEN reference survival metrics",
+        "protocol_revision": SOURCE["revision"],
+        "dtype": "float32",
+        "time_unit": UNITS,
+        "sample_count": len(dataset),
+        "time_count": len(grid),
+        "cutoffs": scores_by_cutoff,
+    }
+    return predictions, report
 
 
 def _environment():
@@ -272,16 +357,23 @@ def main(argv=None):
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--predict-only", type=Path)
+    parser.add_argument(
+        "--evaluate-metrics",
+        action="store_true",
+        help="Evaluate C-index, IBS, and IBLL on the test partition",
+    )
     args = parser.parse_args(argv)
     if args.epochs < 1 or args.patience < 1 or not 0 <= args.seed < 2**32:
         parser.error("epochs/patience must be positive; seed must be in [0, 2**32)")
     if not 1 <= args.split <= 10:
         parser.error("split must be in 1..10")
     saved = None
+    saved_metric_evaluation = None
     if args.predict_only:
         if args.output_dir.resolve() == args.predict_only.resolve():
             parser.error("prediction-only output must differ from the source run")
         saved = json.loads((args.predict_only / "manifest.json").read_text())
+        saved_metric_evaluation = saved.get("metric_evaluation")
         args.split, args.seed = saved["data"]["split"], saved["config"]["seed"]
         if saved["device"] != "cpu" or saved["dtype"] != "float32":
             raise ValueError("manifest requires CPU float32")
@@ -303,6 +395,7 @@ def main(argv=None):
     train, valid, test = (datasets[p] for p in ("train", "valid", "test"))
     if saved:
         manifest = saved.copy()
+        manifest.pop("metric_evaluation", None)
         config = saved["config"]
         grid = np.asarray(saved["prediction_grid"], dtype=np.float32)
         if grid.shape != (128,) or not np.array_equal(grid, _grid(train)):
@@ -390,6 +483,59 @@ def main(argv=None):
         np.testing.assert_array_equal(predictions[key], repeated[key])
     manifest["all_test_rows_checkpoint_reload_identical"] = True
     np.savez(args.output_dir / "test_predictions.npz", **predictions)
+    if args.evaluate_metrics:
+        metric_predictions, metric_report = _evaluate_metrics(model, test)
+        repeated_metric_predictions, repeated_metric_report = _evaluate_metrics(
+            reloaded, test
+        )
+        metric_replay_agreed = metric_report == repeated_metric_report and all(
+            np.array_equal(metric_predictions[key], repeated_metric_predictions[key])
+            for key in metric_predictions
+        )
+        source_run_agreed = None
+        if saved_metric_evaluation is not None:
+            source_prediction_path = (
+                args.predict_only / saved_metric_evaluation["prediction_file"]
+            )
+            source_report_path = args.predict_only / saved_metric_evaluation["report_file"]
+            with np.load(source_prediction_path, allow_pickle=False) as source_archive:
+                source_keys = set(source_archive.files)
+                source_predictions_match = source_keys == set(metric_predictions) and all(
+                    np.array_equal(source_archive[key], metric_predictions[key])
+                    for key in metric_predictions
+                )
+            source_report = json.loads(source_report_path.read_text())
+            source_run_agreed = (
+                source_predictions_match and source_report == metric_report
+            )
+            if not source_run_agreed:
+                raise AssertionError(
+                    "Metric replay differs from the saved training-run predictions or scores"
+                )
+        metric_prediction_file = "test_metric_predictions.npz"
+        metric_report_file = "test_metrics.json"
+        np.savez(args.output_dir / metric_prediction_file, **metric_predictions)
+        (args.output_dir / metric_report_file).write_text(
+            json.dumps(metric_report, indent=2, allow_nan=False) + "\n"
+        )
+        manifest["metric_evaluation"] = {
+            "prediction_file": metric_prediction_file,
+            "report_file": metric_report_file,
+            "cutoffs": [item["cutoff"] for item in metric_report["cutoffs"]],
+            "integration_steps": metric_report["cutoffs"][0]["integration_steps"],
+            "protocol": metric_report["protocol"],
+            "protocol_revision": metric_report["protocol_revision"],
+            "prediction_dtype": metric_report["dtype"],
+            "time_dtype": str(metric_predictions["times"].dtype),
+            "time_unit": metric_report["time_unit"],
+            "sample_count": metric_report["sample_count"],
+            "time_count": metric_report["time_count"],
+            "replay_agreed": metric_replay_agreed,
+            "source_run_agreed": source_run_agreed,
+            "source_run_comparison": (
+                "verified" if source_run_agreed is not None else "unavailable"
+            ),
+        }
     (args.output_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, allow_nan=False) + "\n"
     )
