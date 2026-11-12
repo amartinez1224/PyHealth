@@ -217,6 +217,168 @@ class TestSupportLoader(unittest.TestCase):
         np.testing.assert_array_equal(result["source_row_index"], np.arange(260))
         self.assertEqual(result["survival"].shape, (260, 128))
 
+    def test_prediction_arbitrary_grid_lengths_and_nonzero_start(self):
+        datasets = support.load_support_split(self.data)["datasets"]
+        model = SurvivalMDN(datasets["train"], **support.MODEL_CONFIG)
+        for grid in (
+            np.array([0.0, 0.25, 0.5, 1.0, 2.0], dtype=np.float32),
+            np.array([0.25, 0.5, 1.0], dtype=np.float32),
+        ):
+            with self.subTest(grid=grid):
+                result = support._predict(model, datasets["test"], grid)
+                self.assertEqual(result["survival"].shape, (5, len(grid)))
+                np.testing.assert_array_equal(result["times"], grid)
+                if grid[0] > 0:
+                    self.assertTrue((result["survival"][:, 0] < 1).all())
+                else:
+                    np.testing.assert_array_equal(result["survival"][:, 0], 1)
+
+    def test_float64_grid_values_collapsing_in_float32(self):
+        datasets = support.load_support_split(self.data)["datasets"]
+        model = SurvivalMDN(datasets["train"], **support.MODEL_CONFIG)
+        grid = np.array([0.0, 0.1, 0.1 + 1e-10, 0.5], dtype=np.float64)
+        self.assertLess(grid[1], grid[2])
+        self.assertEqual(np.float32(grid[1]), np.float32(grid[2]))
+
+        predictions = support._predict(model, datasets["test"], grid)
+
+        self.assertEqual(predictions["survival"].shape, (5, len(grid)))
+        np.testing.assert_array_equal(predictions["times"], grid)
+        self.assertEqual(predictions["times"].dtype, np.float64)
+        np.testing.assert_array_equal(
+            predictions["survival"][:, 1], predictions["survival"][:, 2]
+        )
+
+    def test_prediction_rejects_invalid_grids(self):
+        invalid_grids = (
+            np.array([]),
+            np.array([[0.0, 1.0]]),
+            np.array([0.0, np.nan]),
+            np.array([-0.1, 0.1]),
+            np.array([0.0, 0.0]),
+            np.array([1.0, 0.5]),
+            np.array([0.0, np.inf]),
+            np.array(["0", "1"]),
+        )
+        for grid in invalid_grids:
+            with self.subTest(grid=grid), self.assertRaises(ValueError):
+                support._predict(None, object(), grid)
+
+    def test_evaluate_metrics_uses_union_grid_and_full_ordered_cohort(self):
+        datasets = support.load_support_split(self.data)["datasets"]
+        dataset = datasets["test"]
+        helper_grids = (
+            np.array([0.0, 0.5, 1.0], dtype=np.float64),
+            np.array([0.25, 0.5 + 1e-10, 1.25], dtype=np.float64),
+            np.array([0.5, 1.0, 1.5], dtype=np.float64),
+        )
+        helper_calls = []
+
+        def grid_helper(duration, event, **kwargs):
+            helper_calls.append((duration.copy(), event.copy(), kwargs.copy()))
+            return helper_grids[len(helper_calls) - 1]
+
+        class Predictor:
+            def eval(self):
+                return self
+
+            def predict_survival(self, times, *, features):
+                times = times.to(torch.float32)
+                return torch.exp(-times[None, :].expand(len(features), -1))
+
+        score_calls = []
+
+        def score(duration, event, survival, times, **kwargs):
+            score_calls.append((duration.copy(), event.copy(), survival.copy(), times.copy(), kwargs.copy()))
+            return {"c_index": 0.5, "ibs": 0.2, "ibll": -0.3}
+
+        with (
+            patch.object(support, "survival_evaluation_grid", side_effect=grid_helper),
+            patch.object(support, "survival_metrics_fn", side_effect=score),
+        ):
+            predictions, report = support._evaluate_metrics(Predictor(), dataset)
+
+        expected_duration = np.array(
+            [dataset[i]["duration"].item() for i in range(len(dataset))],
+            dtype=np.float32,
+        )
+        expected_event = np.array(
+            [dataset[i]["event"].item() for i in range(len(dataset))],
+            dtype=np.float32,
+        )
+        expected_times = np.unique(np.concatenate(helper_grids))
+        self.assertEqual(expected_times.dtype, np.float64)
+        self.assertNotEqual(expected_times[2], expected_times[3])
+        self.assertEqual(np.float32(expected_times[2]), np.float32(expected_times[3]))
+        self.assertEqual(len(helper_calls), 3)
+        for index, (duration, event, kwargs) in enumerate(helper_calls):
+            np.testing.assert_array_equal(duration, expected_duration)
+            np.testing.assert_array_equal(event, expected_event)
+            self.assertEqual(kwargs["censoring_threshold"], (1e-8, 0.2, 0.4)[index])
+            self.assertEqual(kwargs["integration_steps"], 1000)
+        self.assertEqual(predictions["survival"].shape, (len(dataset), len(expected_times)))
+        np.testing.assert_array_equal(predictions["times"], expected_times)
+        self.assertEqual(predictions["times"].dtype, np.float64)
+        np.testing.assert_array_equal(
+            predictions["survival"][:, 2], predictions["survival"][:, 3]
+        )
+        np.testing.assert_array_equal(predictions["duration"], expected_duration)
+        np.testing.assert_array_equal(predictions["event"], expected_event)
+        np.testing.assert_array_equal(predictions["source_row_index"], np.arange(len(dataset)))
+        self.assertEqual(report["protocol_revision"], support.SOURCE["revision"])
+        self.assertEqual(report["dtype"], "float32")
+        self.assertEqual(report["time_unit"], support.UNITS)
+        self.assertEqual(report["sample_count"], len(dataset))
+        self.assertEqual(report["time_count"], len(expected_times))
+        self.assertEqual(len(report["cutoffs"]), 3)
+        self.assertEqual([entry["cutoff"] for entry in report["cutoffs"]], [1e-8, 0.2, 0.4])
+        self.assertEqual([entry["scores"]["ibs"] for entry in report["cutoffs"]], [0.2] * 3)
+        self.assertEqual(len(score_calls), 3)
+        for index, (duration, event, survival, times, kwargs) in enumerate(score_calls):
+            np.testing.assert_array_equal(duration, expected_duration)
+            np.testing.assert_array_equal(event, expected_event)
+            np.testing.assert_array_equal(survival, predictions["survival"])
+            np.testing.assert_array_equal(times, predictions["times"])
+            self.assertEqual(times.dtype, np.float64)
+            self.assertEqual(kwargs["censoring_threshold"], (1e-8, 0.2, 0.4)[index])
+            self.assertEqual(kwargs["integration_steps"], 1000)
+        json.dumps(report, allow_nan=False)
+
+    def test_evaluate_metrics_names_undefined_cutoff(self):
+        dataset = support.load_support_split(self.data)["datasets"]["test"]
+        with (
+            patch.object(
+                support,
+                "survival_evaluation_grid",
+                side_effect=[np.array([0.0, 1.0]), ValueError("undefined metric")],
+            ),
+            self.assertRaisesRegex(ValueError, "cutoff 0.2.*undefined metric"),
+        ):
+            support._evaluate_metrics(None, dataset)
+
+    def test_evaluate_metrics_names_undefined_score_cutoff(self):
+        dataset = support.load_support_split(self.data)["datasets"]["test"]
+        times = np.array([0.0, 1.0], dtype=np.float32)
+        predictions = {
+            "survival": np.ones((len(dataset), len(times)), dtype=np.float32),
+            "times": times,
+        }
+        score_results = [
+            {"c_index": 0.5, "ibs": 0.2, "ibll": -0.3},
+            ValueError("no comparable pairs"),
+        ]
+        with (
+            patch.object(
+                support,
+                "survival_evaluation_grid",
+                return_value=np.array([0.0, 1.0]),
+            ),
+            patch.object(support, "_predict", return_value=predictions),
+            patch.object(support, "survival_metrics_fn", side_effect=score_results),
+            self.assertRaisesRegex(ValueError, "cutoff 0.2.*no comparable pairs"),
+        ):
+            support._evaluate_metrics(None, dataset)
+
     def test_end_to_end_repeat_and_prediction_only(self):
         # Keep a partial final training batch; validation must be one full batch.
         x, y = self.arrays["train"]
@@ -242,6 +404,12 @@ class TestSupportLoader(unittest.TestCase):
             first = support.main(args + ["--output-dir", str(self.root / "first")])
             support.main(args + ["--output-dir", str(self.root / "second")])
         self.assertEqual(len(train_calls), 2)
+        self.assertNotIn("metric_evaluation", first)
+        self.assertTrue((self.root / "first/test_predictions.npz").is_file())
+        self.assertFalse((self.root / "first/test_metric_predictions.npz").exists())
+        self.assertFalse((self.root / "first/test_metrics.json").exists())
+        with np.load(self.root / "first/test_predictions.npz", allow_pickle=False) as p:
+            self.assertEqual(p["times"].shape, (128,))
         support.main(
             [
                 "--data-dir",
@@ -286,6 +454,211 @@ class TestSupportLoader(unittest.TestCase):
                 ]
             )
         self.assertFalse((self.root / "bad-replay").exists())
+
+    def test_metric_reload_mismatch_does_not_write_artifacts(self):
+        output = self.root / "metric-mismatch"
+        evaluate = support._evaluate_metrics
+        calls = []
+
+        def mismatch_on_reload(model, dataset):
+            predictions, report = evaluate(model, dataset)
+            calls.append(True)
+            if len(calls) == 2:
+                predictions["survival"] = predictions["survival"].copy()
+                predictions["survival"][0, 0] += 0.01
+            return predictions, report
+
+        with (
+            patch.object(support, "_evaluate_metrics", side_effect=mismatch_on_reload),
+            self.assertRaisesRegex(AssertionError, "differ after checkpoint reload"),
+        ):
+            support.main([
+                "--data-dir", str(self.data), "--epochs", "1", "--output-dir",
+                str(output), "--evaluate-metrics",
+            ])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue((output / "test_predictions.npz").is_file())
+        for name in ("test_metric_predictions.npz", "test_metrics.json", "manifest.json"):
+            self.assertFalse((output / name).exists())
+
+    def test_evaluate_metrics_cli_smoke(self):
+        output = self.root / "metric-run"
+        original_train = support.Trainer.train
+        original_evaluate_metrics = support._evaluate_metrics
+        training_completed = []
+
+        def train(trainer, loader, **kwargs):
+            self.assertNotIn("test_dataloader", kwargs)
+            result = original_train(trainer, loader, **kwargs)
+            training_completed.append(True)
+            return result
+
+        def evaluate_metrics(model, dataset):
+            self.assertTrue(training_completed)
+            self.assertEqual(len(dataset), 5)
+            return original_evaluate_metrics(model, dataset)
+
+        with (
+            patch.object(support.Trainer, "train", new=train),
+            patch.object(support, "_evaluate_metrics", side_effect=evaluate_metrics),
+        ):
+            manifest = support.main(
+                [
+                    "--data-dir",
+                    str(self.data),
+                    "--epochs",
+                    "1",
+                    "--patience",
+                    "1",
+                    "--output-dir",
+                    str(output),
+                    "--evaluate-metrics",
+                ]
+            )
+
+        self.assertEqual(len(manifest["prediction_grid"]), 128)
+        self.assertTrue((output / "test_predictions.npz").is_file())
+        self.assertTrue((output / "test_metric_predictions.npz").is_file())
+        self.assertTrue((output / "test_metrics.json").is_file())
+        metric_metadata = manifest["metric_evaluation"]
+        self.assertEqual(metric_metadata["prediction_file"], "test_metric_predictions.npz")
+        self.assertEqual(metric_metadata["report_file"], "test_metrics.json")
+        self.assertEqual(metric_metadata["cutoffs"], [1e-8, 0.2, 0.4])
+        self.assertEqual(metric_metadata["integration_steps"], 1000)
+        self.assertEqual(metric_metadata["prediction_dtype"], "float32")
+        self.assertEqual(metric_metadata["time_dtype"], "float64")
+        self.assertTrue(metric_metadata["replay_agreed"])
+        with np.load(output / "test_predictions.npz", allow_pickle=False) as legacy:
+            self.assertEqual(legacy["times"].shape, (128,))
+        with np.load(
+            output / "test_metric_predictions.npz", allow_pickle=False
+        ) as metric_predictions:
+            self.assertEqual(
+                metric_predictions["survival"].shape,
+                (5, metric_metadata["time_count"]),
+            )
+            self.assertGreater(metric_metadata["time_count"], 128)
+        report = json.loads((output / "test_metrics.json").read_text())
+        self.assertEqual(report["sample_count"], 5)
+        self.assertEqual(len(report["cutoffs"]), 3)
+        self.assertTrue(all("scores" in item for item in report["cutoffs"]))
+
+        source_files = (
+            "manifest.json",
+            "test_metric_predictions.npz",
+            "test_metrics.json",
+            "checkpoints/best.ckpt",
+        )
+        source_contents = {
+            name: (output / name).read_bytes() for name in source_files
+        }
+        replay_output = self.root / "metric-replay"
+        with patch.object(
+            support.Trainer,
+            "train",
+            new=lambda *args, **kwargs: self.fail("Trainer.train called during replay"),
+        ):
+            replay_manifest = support.main(
+                [
+                    "--data-dir",
+                    str(self.data),
+                    "--predict-only",
+                    str(output),
+                    "--output-dir",
+                    str(replay_output),
+                    "--evaluate-metrics",
+                ]
+            )
+        replay_metadata = replay_manifest["metric_evaluation"]
+        self.assertTrue(replay_metadata["replay_agreed"])
+        self.assertTrue(replay_metadata["source_run_agreed"])
+        self.assertEqual(replay_metadata["source_run_comparison"], "verified")
+        replay_report = json.loads((replay_output / "test_metrics.json").read_text())
+        self.assertEqual(replay_report, report)
+        with (
+            np.load(output / "test_metric_predictions.npz", allow_pickle=False) as source,
+            np.load(
+                replay_output / "test_metric_predictions.npz", allow_pickle=False
+            ) as replay,
+        ):
+            self.assertEqual(set(source.files), set(replay.files))
+            for key in source.files:
+                np.testing.assert_array_equal(source[key], replay[key])
+        source_checkpoint = torch.load(
+            output / "checkpoints/best.ckpt", weights_only=True
+        )
+        replay_checkpoint = torch.load(
+            replay_output / "checkpoints/best.ckpt", weights_only=True
+        )
+        for key in source_checkpoint:
+            torch.testing.assert_close(
+                source_checkpoint[key], replay_checkpoint[key], atol=0, rtol=0
+            )
+
+        no_metric_output = self.root / "metric-disabled-replay"
+        with patch.object(
+            support.Trainer,
+            "train",
+            new=lambda *args, **kwargs: self.fail("Trainer.train called during replay"),
+        ):
+            no_metric_manifest = support.main(
+                [
+                    "--data-dir",
+                    str(self.data),
+                    "--predict-only",
+                    str(output),
+                    "--output-dir",
+                    str(no_metric_output),
+                ]
+            )
+        self.assertNotIn("metric_evaluation", no_metric_manifest)
+        self.assertFalse((no_metric_output / "test_metric_predictions.npz").exists())
+        self.assertFalse((no_metric_output / "test_metrics.json").exists())
+        for name, contents in source_contents.items():
+            self.assertEqual((output / name).read_bytes(), contents)
+
+    def test_predict_only_metrics_with_legacy_manifest(self):
+        output = self.root / "legacy-run"
+        source_manifest = support.main(
+            [
+                "--data-dir",
+                str(self.data),
+                "--epochs",
+                "1",
+                "--patience",
+                "1",
+                "--output-dir",
+                str(output),
+            ]
+        )
+        self.assertNotIn("metric_evaluation", source_manifest)
+        replay_output = self.root / "legacy-metric-replay"
+        with patch.object(
+            support.Trainer,
+            "train",
+            new=lambda *args, **kwargs: self.fail("Trainer.train called during replay"),
+        ):
+            replay_manifest = support.main(
+                [
+                    "--data-dir",
+                    str(self.data),
+                    "--predict-only",
+                    str(output),
+                    "--output-dir",
+                    str(replay_output),
+                    "--evaluate-metrics",
+                ]
+            )
+        metric_metadata = replay_manifest["metric_evaluation"]
+        self.assertTrue(metric_metadata["replay_agreed"])
+        self.assertIsNone(metric_metadata["source_run_agreed"])
+        self.assertEqual(metric_metadata["source_run_comparison"], "unavailable")
+        self.assertTrue((replay_output / "test_metric_predictions.npz").is_file())
+        self.assertTrue((replay_output / "test_metrics.json").is_file())
+        self.assertNotIn(
+            "metric_evaluation",
+            json.loads((output / "manifest.json").read_text()),
+        )
 
     def test_invalid_cli(self):
         for option in (
