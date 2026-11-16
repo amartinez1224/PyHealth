@@ -326,6 +326,9 @@ class TestSupportLoader(unittest.TestCase):
         np.testing.assert_array_equal(predictions["event"], expected_event)
         np.testing.assert_array_equal(predictions["source_row_index"], np.arange(len(dataset)))
         self.assertEqual(report["protocol_revision"], support.SOURCE["revision"])
+        self.assertEqual(
+            report["time_grid_convention"], support.METRIC_GRID_CONVENTION
+        )
         self.assertEqual(report["dtype"], "float32")
         self.assertEqual(report["time_unit"], support.UNITS)
         self.assertEqual(report["sample_count"], len(dataset))
@@ -480,6 +483,60 @@ class TestSupportLoader(unittest.TestCase):
         self.assertTrue((output / "test_predictions.npz").is_file())
         for name in ("test_metric_predictions.npz", "test_metrics.json", "manifest.json"):
             self.assertFalse((output / name).exists())
+
+    def test_metric_reload_rejects_equal_values_with_different_dtype(self):
+        output = self.root / "metric-dtype-mismatch"
+        evaluate = support._evaluate_metrics
+        calls = []
+
+        def dtype_mismatch_on_reload(model, dataset):
+            predictions, report = evaluate(model, dataset)
+            calls.append(True)
+            if len(calls) == 2:
+                predictions["survival"] = predictions["survival"].astype(np.float64)
+            return predictions, report
+
+        with (
+            patch.object(support, "_evaluate_metrics", side_effect=dtype_mismatch_on_reload),
+            self.assertRaisesRegex(AssertionError, "differ after checkpoint reload"),
+        ):
+            support.main([
+                "--data-dir", str(self.data), "--epochs", "1", "--output-dir",
+                str(output), "--evaluate-metrics",
+            ])
+        self.assertEqual(len(calls), 2)
+        self.assertFalse((output / "test_metric_predictions.npz").exists())
+        self.assertFalse((output / "test_metrics.json").exists())
+        self.assertFalse((output / "manifest.json").exists())
+
+    def test_source_replay_rejects_equal_values_with_different_dtype(self):
+        source = self.root / "dtype-source"
+        support.main([
+            "--data-dir", str(self.data), "--epochs", "1", "--output-dir",
+            str(source), "--evaluate-metrics",
+        ])
+        source_npz = source / "test_metric_predictions.npz"
+        source_bytes = source_npz.read_bytes()
+        replay = self.root / "dtype-replay"
+        evaluate = support._evaluate_metrics
+
+        def dtype_mismatch_for_replay(model, dataset):
+            predictions, report = evaluate(model, dataset)
+            predictions["survival"] = predictions["survival"].astype(np.float64)
+            return predictions, report
+
+        with (
+            patch.object(support, "_evaluate_metrics", side_effect=dtype_mismatch_for_replay),
+            self.assertRaisesRegex(AssertionError, "differs from the saved training-run"),
+        ):
+            support.main([
+                "--data-dir", str(self.data), "--predict-only", str(source),
+                "--output-dir", str(replay), "--evaluate-metrics",
+            ])
+        self.assertEqual(source_npz.read_bytes(), source_bytes)
+        self.assertFalse((replay / "test_metric_predictions.npz").exists())
+        self.assertFalse((replay / "test_metrics.json").exists())
+        self.assertFalse((replay / "manifest.json").exists())
 
     def test_evaluate_metrics_cli_smoke(self):
         output = self.root / "metric-run"

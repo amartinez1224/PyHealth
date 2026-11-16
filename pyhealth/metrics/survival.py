@@ -128,6 +128,16 @@ def survival_evaluation_grid(
 
     Raises:
         ValueError: Invalid inputs or an undefined requested metric.
+
+    Examples:
+        >>> import numpy as np
+        >>> duration = np.array([1.0, 2.0, 3.0, 4.0])
+        >>> event = np.array([1, 0, 1, 1])
+        >>> times = survival_evaluation_grid(
+        ...     duration, event, integration_steps=16
+        ... )
+        >>> times.dtype == np.float64 and np.all(np.diff(times) > 0)
+        np.True_
     """
     duration, event = _labels(duration, event)
     names = _options(metrics, censoring_threshold, integration_steps)
@@ -205,6 +215,25 @@ def survival_metrics_fn(
         An event tied with a censoring time is comparable; prediction ties
         get zero credit. See the API guide for limitations and exact formulas.
         Runtime is O(N^2 + N*T + N*integration_steps); no N-by-N array is built.
+
+    Examples:
+        >>> import numpy as np
+        >>> duration = np.array([1.0, 2.0, 3.0, 4.0])
+        >>> event = np.array([1, 0, 1, 1])
+        >>> times = survival_evaluation_grid(
+        ...     duration, event, integration_steps=16
+        ... )
+        >>> rates = np.array([0.2, 0.3, 0.4, 0.5])
+        >>> survival = np.exp(-rates[:, None] * times[None, :])
+        >>> survival.shape == (len(duration), len(times))
+        True
+        >>> scores = survival_metrics_fn(
+        ...     duration, event, survival, times, integration_steps=16
+        ... )
+        >>> set(scores) == {"c_index", "ibs", "ibll"}
+        True
+        >>> np.isfinite(list(scores.values())).all()
+        np.True_
     """
     duration, event = _labels(duration, event)
     names = _options(metrics, censoring_threshold, integration_steps)

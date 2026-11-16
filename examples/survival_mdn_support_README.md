@@ -218,9 +218,15 @@ checkpoint into a fresh model and requires exact agreement for all test rows.
 Metric evaluation is opt-in and happens after the selected checkpoint has been
 restored. It predicts on the sorted unique union of the times required for
 censoring cutoffs `1e-8`, `0.2`, and `0.4`; each cutoff uses 1,000 integration
-points. This is separate from the baseline's 128-point curve. Inference is CPU
-float32, so query times returned by the metric grid are rounded to float32
-before model evaluation. Do not expect bitwise identity with a float64 query.
+points. The model is queried once on the sorted unique union of all required
+times across those cutoffs, and that shared grid is recorded as `times` in
+`test_metric_predictions.npz` and summarized by `time_grid_convention` in
+`test_metrics.json`. For each cutoff's IBS/IBLL, predicted survival `S(t)` and
+censoring-KM `G(t)` use the same integration points from this shared grid; the
+`G(u_i)` weights are evaluated at the observed durations. This is separate from
+the baseline's 128-point curve. Inference is CPU float32, so query times in the
+artifact retain their original float64 grid values while model queries receive
+ordinary float32 rounding.
 
 C-index and IBLL are higher-is-better; IBS is lower-is-better. IBLL is a signed
 log-likelihood and is usually negative, not a positive loss to negate. The
