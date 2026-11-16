@@ -29,6 +29,12 @@ SOURCE = {
 }
 OFFSET = 0.001
 UNITS = "released SUPPORT time units + 0.001"
+METRIC_GRID_CONVENTION = (
+    "Predictions use one sorted unique union of required evaluation times across "
+    "censoring cutoffs 1e-8, 0.2, and 0.4. For each cutoff, IBS/IBLL evaluate "
+    "predicted survival S(t) and censoring-KM G(t) at the same integration "
+    "points; G(u_i) is evaluated at observed durations."
+)
 MODEL_CONFIG = {
     "feature_key": "features",
     "duration_key": "duration",
@@ -301,6 +307,7 @@ def _evaluate_metrics(model, dataset):
     report = {
         "protocol": "Survival-MDN/SODEN reference survival metrics",
         "protocol_revision": SOURCE["revision"],
+        "time_grid_convention": METRIC_GRID_CONVENTION,
         "dtype": "float32",
         "time_unit": UNITS,
         "sample_count": len(dataset),
@@ -491,9 +498,16 @@ def main(argv=None):
         repeated_metric_predictions, repeated_metric_report = _evaluate_metrics(
             reloaded, test
         )
-        metric_replay_agreed = metric_report == repeated_metric_report and all(
-            np.array_equal(metric_predictions[key], repeated_metric_predictions[key])
-            for key in metric_predictions
+        metric_replay_agreed = (
+            metric_report == repeated_metric_report
+            and metric_predictions.keys() == repeated_metric_predictions.keys()
+            and all(
+                metric_predictions[key].dtype == repeated_metric_predictions[key].dtype
+                and np.array_equal(
+                    metric_predictions[key], repeated_metric_predictions[key]
+                )
+                for key in metric_predictions
+            )
         )
         if not metric_replay_agreed:
             raise AssertionError("Metric predictions or scores differ after checkpoint reload")
@@ -506,7 +520,10 @@ def main(argv=None):
             with np.load(source_prediction_path, allow_pickle=False) as source_archive:
                 source_keys = set(source_archive.files)
                 source_predictions_match = source_keys == set(metric_predictions) and all(
-                    np.array_equal(source_archive[key], metric_predictions[key])
+                    source_archive[key].dtype == metric_predictions[key].dtype
+                    and np.array_equal(
+                        source_archive[key], metric_predictions[key]
+                    )
                     for key in metric_predictions
                 )
             source_report = json.loads(source_report_path.read_text())

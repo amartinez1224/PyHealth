@@ -118,6 +118,11 @@ unchanged. The metric prediction archive contains the usual label and row
 metadata fields, with ``survival [N_test, T_metric]`` and ``times
 [T_metric]``.
 
+The saved report's ``time_grid_convention`` records that single shared union.
+For each cutoff's IBS/IBLL, predicted survival :math:`S(t)` and censoring-KM
+:math:`G(t)` are evaluated at the same integration points from that union;
+:math:`G(u_i)` is evaluated at the observed durations.
+
 Use the metric artifact's ``duration``, ``event``, ``survival`` and ``times``
 without sorting rows or changing units. ``duration`` already includes the
 single ``+0.001`` offset added before float32 conversion. Do not add it again
