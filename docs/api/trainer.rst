@@ -93,6 +93,12 @@ object. To capture results for downstream use, call ``evaluate()`` separately:
     with open("results.json", "w") as f:
         json.dump(scores, f, indent=2)
 
+Evaluation loss is the mean over evaluated samples, including a short final
+batch. Models must return a scalar loss averaged over their batch's samples;
+Trainer weights it by the actual batch size. This applies to both standard
+modes and custom-loss models (``mode=None``). Empty evaluation loaders raise
+``ValueError``. Training log loss still averages training batch losses.
+
 Reproducible Runs
 -----------------
 

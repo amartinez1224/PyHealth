@@ -75,7 +75,9 @@ varies by task type:
   logits depending on the task, producing calibrated probabilities.
 
 The ``forward()`` method is expected to return a dictionary with four keys:
-``loss``, ``y_prob``, ``y_true``, and ``logit``. The Trainer reads all four.
+``loss``, ``y_prob``, ``y_true``, and ``logit``. The Trainer reads all four for standard task modes. Custom-loss models such as
+:doc:`models/pyhealth.models.SurvivalMDN` use ``mode=None`` and return a scalar
+``loss`` for training/evaluation, with a specialized prediction method.
 
 EmbeddingModel
 --------------
@@ -210,6 +212,7 @@ API Reference
     models/pyhealth.models.BaseModel
     models/pyhealth.models.LogisticRegression
     models/pyhealth.models.MLP
+    models/pyhealth.models.SurvivalMDN
     models/pyhealth.models.CNN
     models/pyhealth.models.RNN
     models/pyhealth.models.GNN

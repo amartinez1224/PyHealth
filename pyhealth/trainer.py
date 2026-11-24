@@ -31,6 +31,27 @@ def _cpu_state_dict(model: nn.Module) -> dict:
     }
 
 
+def _batch_size(data):
+    """Count samples in collated tensors, metadata lists, or processor tuples."""
+    if isinstance(data, torch.Tensor):
+        return data.shape[0] if data.ndim else None
+    if isinstance(data, dict):
+        if "patient_id" in data:
+            return len(data["patient_id"])
+        values = data.values()
+    elif isinstance(data, tuple):
+        values = data
+    elif isinstance(data, list):
+        return len(data)
+    else:
+        return None
+    for value in values:
+        size = _batch_size(value)
+        if size is not None:
+            return size
+    return None
+
+
 def is_best(best_score: float, score: float, monitor_criterion: str) -> bool:
     if monitor_criterion == "max":
         return score > best_score
@@ -335,11 +356,12 @@ class Trainer:
         Returns:
             y_true_all: List of true labels.
             y_prob_all: List of predicted probabilities.
-            loss_mean: Mean loss over batches.
+            loss_mean: Sample-weighted mean of per-sample batch losses.
             additional_outputs (only if requested): Dict of additional results.
             patient_ids (only if requested): List of patient ids in the same order as y_true_all/y_prob_all.
         """
-        loss_all = []
+        loss_sum = 0.0
+        sample_count = 0
         y_true_all = []
         y_prob_all = []
         patient_ids = []
@@ -352,7 +374,9 @@ class Trainer:
                 loss = output["loss"]
                 y_true = output["y_true"].cpu().numpy()
                 y_prob = output["y_prob"].cpu().numpy()
-                loss_all.append(loss.item())
+                batch_size = len(y_true)
+                loss_sum += loss.item() * batch_size
+                sample_count += batch_size
                 y_true_all.append(y_true)
                 y_prob_all.append(y_prob)
                 if additional_outputs is not None:
@@ -360,7 +384,9 @@ class Trainer:
                         additional_outputs[key].append(output[key].cpu().numpy())
             if return_patient_ids:
                 patient_ids.extend(data["patient_id"])
-        loss_mean = sum(loss_all) / len(loss_all)
+        if sample_count == 0:
+            raise ValueError("Cannot evaluate an empty dataloader.")
+        loss_mean = loss_sum / sample_count
         y_true_all = np.concatenate(y_true_all, axis=0)
         y_prob_all = np.concatenate(y_prob_all, axis=0)
         outputs = [y_true_all, y_prob_all, loss_mean]
@@ -373,7 +399,10 @@ class Trainer:
         return outputs
 
     def evaluate(self, dataloader) -> Dict[str, float]:
-        """Evaluates the model.
+        """Evaluate metrics and the sample-weighted mean loss.
+
+        Models must return a scalar loss averaged over samples in each batch.
+        Unequal batches are weighted by their actual sample counts.
 
         Args:
             dataloader: Dataloader for evaluation.
@@ -388,14 +417,21 @@ class Trainer:
             scores = metrics_fn(y_true_all, y_prob_all, metrics=self.metrics)
             scores["loss"] = loss_mean
         else:
-            loss_all = []
+            loss_sum = 0.0
+            sample_count = 0
+            self.model.eval()
             for data in tqdm(dataloader, desc="Evaluation"):
-                self.model.eval()
+                batch_size = _batch_size(data)
+                if batch_size is None or batch_size <= 0:
+                    raise ValueError("Cannot infer a positive sample count from batch.")
                 with torch.no_grad():
                     output = self.model(**data)
                     loss = output["loss"]
-                    loss_all.append(loss.item())
-            loss_mean = sum(loss_all) / len(loss_all)
+                    loss_sum += loss.item() * batch_size
+                    sample_count += batch_size
+            if sample_count == 0:
+                raise ValueError("Cannot evaluate an empty dataloader.")
+            loss_mean = loss_sum / sample_count
             scores = {"loss": loss_mean}
         return scores
 
