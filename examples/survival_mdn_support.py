@@ -233,8 +233,14 @@ def _environment():
 
     def git(*args):
         return subprocess.check_output(
-            ["git", "-C", str(root), *args], text=True
+            ["git", "-C", str(root), *args], text=True, stderr=subprocess.PIPE
         ).strip()
+
+    try:
+        git_sha = git("rev-parse", "HEAD")
+        git_dirty = bool(git("status", "--porcelain"))
+    except (OSError, subprocess.CalledProcessError):
+        git_sha = git_dirty = None
 
     return {
         "python": platform.python_version(),
@@ -243,8 +249,8 @@ def _environment():
             name: importlib.metadata.version(name)
             for name in ("torch", "numpy", "pyhealth", "litdata")
         },
-        "pyhealth_git_sha": git("rev-parse", "HEAD"),
-        "pyhealth_git_dirty": bool(git("status", "--porcelain")),
+        "pyhealth_git_sha": git_sha,
+        "pyhealth_git_dirty": git_dirty,
         "thread_count": torch.get_num_threads(),
         "interop_thread_count": torch.get_num_interop_threads(),
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),

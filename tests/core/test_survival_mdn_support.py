@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,29 @@ SPEC = importlib.util.spec_from_file_location(
 )
 support = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(support)
+
+
+class TestSupportEnvironment(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(support.platform, "platform", return_value="test"))
+
+    def test_unavailable_git_metadata_is_json_null(self):
+        for error in (FileNotFoundError(), subprocess.CalledProcessError(128, "git")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(support.subprocess, "check_output", side_effect=error):
+                    environment = json.loads(json.dumps(support._environment()))
+                self.assertIsNone(environment["pyhealth_git_sha"])
+                self.assertIsNone(environment["pyhealth_git_dirty"])
+
+    def test_available_git_metadata_reports_checkout_status(self):
+        for status in ("", " M example.py\n"):
+            with self.subTest(status=status):
+                with patch.object(
+                    support.subprocess, "check_output", side_effect=["abc123\n", status]
+                ):
+                    environment = support._environment()
+                self.assertEqual(environment["pyhealth_git_sha"], "abc123")
+                self.assertIs(environment["pyhealth_git_dirty"], bool(status))
 
 
 class TestSupportLoader(unittest.TestCase):
