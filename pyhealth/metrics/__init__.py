@@ -21,6 +21,7 @@ from .multiclass import multiclass_metrics_fn
 from .multilabel import multilabel_metrics_fn
 from .ranking import ranking_metrics_fn
 from .regression import regression_metrics_fn
+from .survival import survival_evaluation_grid, survival_metrics_fn
 
 __all__ = [
     "ComprehensivenessMetric",
@@ -43,4 +44,6 @@ __all__ = [
     "paired_bootstrap_diff",
     "ranking_metrics_fn",
     "regression_metrics_fn",
+    "survival_evaluation_grid",
+    "survival_metrics_fn",
 ]
