@@ -119,16 +119,12 @@ import argparse
 import logging
 import random
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
 import torch
-
-from pyhealth.datasets import SampleDataset, create_sample_dataset, get_dataloader
-from pyhealth.models import SurvivalMDN
-from pyhealth.trainer import Trainer
 
 # Reuse the SUPPORT loader and metrics from the baseline script.
 from survival_mdn_support import (
@@ -137,6 +133,10 @@ from survival_mdn_support import (
     _evaluate_metrics,
     load_support_split,
 )
+
+from pyhealth.datasets import SampleDataset, create_sample_dataset, get_dataloader
+from pyhealth.models import SurvivalMDN
+from pyhealth.trainer import Trainer
 
 WEIGHT_MODES = ("uniform", "shared", "patient")
 HIDDEN_SIZES = (32, 64)
@@ -349,9 +349,7 @@ def matched_differences(results: pd.DataFrame) -> pd.DataFrame:
         modes = wide.index.get_level_values("weight_mode")
         if left not in modes or right not in modes:
             continue
-        diff = wide.xs(left, level="weight_mode") - wide.xs(
-            right, level="weight_mode"
-        )
+        diff = wide.xs(left, level="weight_mode") - wide.xs(right, level="weight_mode")
         for hidden_size, group in diff.groupby(level="hidden_size"):
             row = {"comparison": f"{left} - {right}", "hidden_size": hidden_size}
             row["n_pairs"] = len(group)
@@ -382,7 +380,7 @@ def format_table(table: pd.DataFrame, columns: Sequence[str]) -> str:
     return shown.to_string()
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse and validate command line arguments.
 
     Args:
@@ -422,7 +420,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
-def main(argv: Optional[Sequence[str]] = None) -> pd.DataFrame:
+def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
     """Run the weight-mode ablation and write results to ``--output-dir``.
 
     Args:
