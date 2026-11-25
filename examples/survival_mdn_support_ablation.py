@@ -340,9 +340,14 @@ def matched_differences(results: pd.DataFrame) -> pd.DataFrame:
     Returns:
         Table indexed by (comparison, hidden_size) with the mean and std over
         seeds of each metric difference. Comparisons whose modes are missing
-        from ``results`` are skipped.
+        from ``results`` are skipped, so the table is empty (with the same
+        index and columns) when no comparison can be made, for example in a
+        uniform-only run.
     """
     columns = metric_columns(results)
+    table_columns = ["comparison", "hidden_size", "n_pairs"] + [
+        f"{column}_{stat}" for column in columns for stat in ("mean", "std")
+    ]
     wide = results.set_index(["hidden_size", "seed", "weight_mode"])[columns]
     rows = []
     for left, right in DIFFERENCES:
@@ -357,7 +362,8 @@ def matched_differences(results: pd.DataFrame) -> pd.DataFrame:
                 row[f"{column}_mean"] = group[column].mean()
                 row[f"{column}_std"] = group[column].std()
             rows.append(row)
-    return pd.DataFrame(rows).set_index(["comparison", "hidden_size"])
+    table = pd.DataFrame(rows, columns=table_columns)
+    return table.set_index(["comparison", "hidden_size"])
 
 
 def format_table(table: pd.DataFrame, columns: Sequence[str]) -> str:
@@ -462,11 +468,14 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
     print("\nMean ± std across seeds (test set, cutoff 1e-8):")
     print(format_table(summary, [*METRICS, "n_params", "best_epoch"]))
     differences = matched_differences(results)
+    # Always write it, so a rerun never leaves an older file behind.
+    differences.to_csv(args.output_dir / "matched_differences.csv")
     if len(differences):
-        differences.to_csv(args.output_dir / "matched_differences.csv")
         print("\nMatched differences (same seed and hidden size):")
         print("IBS < 0 favors the first mode; C-index and IBLL > 0 do.")
         print(format_table(differences, METRICS))
+    else:
+        print("\nNo matched differences: the runs need patient and shared or uniform.")
     print(f"\nResults written to {args.output_dir.resolve()}")
     return results
 
