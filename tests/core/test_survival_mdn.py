@@ -827,8 +827,8 @@ class TestWeightModes(unittest.TestCase):
         cls.dataset = _dataset()
         cls.batch = _batch(cls.dataset)
 
-    def _model(self, mode):
-        torch.manual_seed(5)
+    def _model(self, mode, seed=5):
+        torch.manual_seed(seed)
         return SurvivalMDN(
             self.dataset,
             hidden_dims=(8, 6),
@@ -905,6 +905,69 @@ class TestWeightModes(unittest.TestCase):
         curves = model.eval().predict_survival(times, features=self.batch["features"])
         self.assertEqual(curves.shape, (4, 3))
         self.assertEqual(curves.dtype, torch.float64)
+
+    def test_checkpoint_round_trip_for_each_mode(self):
+        weight_keys = {
+            "patient": {"weight_head.weight", "weight_head.bias"},
+            "shared": {"shared_weight_logits"},
+            "uniform": set(),
+        }
+        grid = torch.tensor([0.0, 0.5, 2.0])
+        features = self.batch["features"]
+        for mode in self.MODES:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                model = self._model(mode)
+                if mode == "shared":
+                    # A fresh model starts at zeros, so use values it cannot match.
+                    with torch.no_grad():
+                        model.shared_weight_logits.copy_(torch.tensor([0.5, -1.0, 2.0]))
+                path = str(Path(directory) / "model.ckpt")
+                Trainer(model, device="cpu", enable_logging=False).save_ckpt(path)
+
+                saved = torch.load(path, weights_only=True)
+                saved_weight_keys = {
+                    key
+                    for key in saved
+                    if key.startswith("weight_head.") or key == "shared_weight_logits"
+                }
+                self.assertEqual(saved_weight_keys, weight_keys[mode])
+                if mode == "shared":
+                    self.assertEqual(
+                        saved["shared_weight_logits"].shape, (self.N_COMPONENTS,)
+                    )
+
+                restored = self._model(mode, seed=99)
+                self.assertFalse(
+                    all(
+                        torch.equal(value, restored.state_dict()[key])
+                        for key, value in saved.items()
+                    )
+                )
+                Trainer(restored, device="cpu", enable_logging=False).load_ckpt(path)
+                for key, value in model.state_dict().items():
+                    torch.testing.assert_close(
+                        restored.state_dict()[key], value, atol=0, rtol=0
+                    )
+                torch.testing.assert_close(
+                    restored.eval().predict_survival(grid, features=features),
+                    model.eval().predict_survival(grid, features=features),
+                )
+
+    def test_checkpoint_rejects_other_weight_mode(self):
+        for saved_mode, loaded_mode in (("shared", "uniform"), ("uniform", "shared")):
+            with (
+                self.subTest(saved=saved_mode, loaded=loaded_mode),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = str(Path(directory) / "model.ckpt")
+                Trainer(
+                    self._model(saved_mode), device="cpu", enable_logging=False
+                ).save_ckpt(path)
+                trainer = Trainer(
+                    self._model(loaded_mode), device="cpu", enable_logging=False
+                )
+                with self.assertRaises(RuntimeError):
+                    trainer.load_ckpt(path)
 
     def test_invalid_weight_mode_raises(self):
         for bad in ("Patient", "", "none", None, 1):
