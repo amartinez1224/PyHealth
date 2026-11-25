@@ -20,6 +20,9 @@ Experimental setup:
       (predicted from features, the default model behavior).
     * Grid: 3 weight modes x 2 hidden sizes ([32, 32, 32] and [64, 64, 64])
       x 3 seeds (0, 1, 2) = 18 runs.
+    * Same start: with the same seed, all three modes start with identical
+      hidden layers and mean and scale heads, so runs differ only in how the
+      mixture weights are produced.
     * Held constant: Adam, learning rate 0.001, batch size 256, gradient
       clipping at 100, maximum epochs, patience, and early stopping on
       validation NLL with the best-epoch weights restored. The test set is
@@ -41,30 +44,30 @@ Results:
     training time in seconds and depends on how many epochs early stopping ran.
 
     weight_mode  hidden  IBS              C-index        IBLL
-    uniform      32      0.1906 ± 0.0002  0.607 ± 0.007  -0.5637 ± 0.0032
-    shared       32      0.1908 ± 0.0004  0.609 ± 0.007  -0.5629 ± 0.0015
+    uniform      32      0.1915 ± 0.0002  0.603 ± 0.001  -0.5642 ± 0.0004
+    shared       32      0.1918 ± 0.0002  0.604 ± 0.002  -0.5649 ± 0.0008
     patient      32      0.1885 ± 0.0005  0.616 ± 0.002  -0.5561 ± 0.0016
-    uniform      64      0.1914 ± 0.0006  0.609 ± 0.003  -0.5640 ± 0.0015
-    shared       64      0.1915 ± 0.0008  0.608 ± 0.003  -0.5643 ± 0.0022
+    uniform      64      0.1910 ± 0.0008  0.608 ± 0.005  -0.5632 ± 0.0024
+    shared       64      0.1911 ± 0.0008  0.608 ± 0.004  -0.5632 ± 0.0022
     patient      64      0.1889 ± 0.0010  0.621 ± 0.003  -0.5571 ± 0.0022
 
     weight_mode  hidden  parameters  time (s)
-    uniform      32       3341       2.49 ± 0.37
-    shared       32       3346       2.49 ± 0.49
-    patient      32       3506       2.17 ± 0.08
-    uniform      64      10765       1.95 ± 0.32
-    shared       64      10770       1.92 ± 0.17
-    patient      64      11090       1.58 ± 0.12
+    uniform      32       3341       2.14 ± 0.29
+    shared       32       3346       2.74 ± 0.38
+    patient      32       3506       2.08 ± 0.27
+    uniform      64      10765       1.60 ± 0.17
+    shared       64      10770       1.61 ± 0.17
+    patient      64      11090       1.32 ± 0.08
 
     Matched differences, mean ± std over the 3 seeds (same seed and hidden
     size). IBS below zero favors patient. C-index and IBLL above zero favor
     patient.
 
     comparison         hidden  IBS               C-index        IBLL
-    patient - shared   32      -0.0023 ± 0.0002  0.007 ± 0.005  0.0069 ± 0.0009
-    patient - shared   64      -0.0027 ± 0.0011  0.012 ± 0.001  0.0072 ± 0.0026
-    patient - uniform  32      -0.0021 ± 0.0004  0.009 ± 0.005  0.0076 ± 0.0037
-    patient - uniform  64      -0.0025 ± 0.0009  0.012 ± 0.003  0.0069 ± 0.0020
+    patient - shared   32      -0.0033 ± 0.0003  0.012 ± 0.000  0.0088 ± 0.0009
+    patient - shared   64      -0.0022 ± 0.0002  0.012 ± 0.003  0.0061 ± 0.0002
+    patient - uniform  32      -0.0029 ± 0.0006  0.013 ± 0.003  0.0082 ± 0.0017
+    patient - uniform  64      -0.0021 ± 0.0002  0.013 ± 0.004  0.0061 ± 0.0003
 
     Matched pairs where patient had lower IBS (6 pairs per comparison: 2 hidden
     sizes x 3 seeds):
@@ -77,22 +80,21 @@ Results:
     Findings:
     * The hypothesis held in this experiment. Patient-specific weights gave a
       lower IBS than shared weights in all 6 matched pairs. The mean IBS gain
-      was 0.0023 at hidden size 32 and 0.0027 at hidden size 64. Patient also
+      was 0.0033 at hidden size 32 and 0.0022 at hidden size 64. Patient also
       had the higher C-index and IBLL in all 6 pairs against both baselines.
     * Shared weights were not better than uniform weights. Shared had the lower
-      IBS in only 2 of 6 pairs, and the mean IBS differed by 0.0002 or less
-      (0.1908 vs 0.1906 at size 32, 0.1915 vs 0.1914 at size 64). Learning one
-      global weight vector gave no clear gain over fixed 1/K weights.
+      IBS in 0 of 6 pairs, and the mean IBS differed by 0.0003 or less
+      (0.1918 vs 0.1915 at size 32, 0.1911 vs 0.1910 at size 64). Learning one
+      global weight vector gave no gain over fixed 1/K weights.
     * Patient-specific weights cost 160 more parameters than shared weights at
       hidden size 32 (3506 vs 3346) and 320 more at size 64 (11090 vs 10770).
       That is 4.8% and 3.0% more parameters. The patient model with hidden size
       32 (IBS 0.1885) beat the shared and uniform models with hidden size 64
-      (IBS 0.1915 and 0.1914), which have about 3 times as many parameters.
+      (IBS 0.1911 and 0.1910), which have about 3 times as many parameters.
     * The results hold at cutoffs 0.2 and 0.4. Patient had the lower IBS in
       6 of 6 pairs for both comparisons at both cutoffs. The mean IBS gain
-      against shared was 0.0025 (size 32) and 0.0030 (size 64) at cutoff 0.2,
-      and 0.0027 and 0.0030 at cutoff 0.4. Against uniform it was 0.0023 and
-      0.0028 at both cutoffs.
+      against shared was 0.0036 (size 32) and 0.0025 (size 64) at both
+      cutoffs. Against uniform it was 0.0032 and 0.0024 at both cutoffs.
 
     Limitations:
     * Only 3 seeds, so the std values are rough. No significance test was run.
@@ -100,8 +102,12 @@ Results:
     * CPU, float32, one thread, deterministic mode, one set of training
       settings, and 5 mixture components.
     * The gains are small: about 0.002 to 0.003 in IBS on a base near 0.19.
-      They are a few times larger than the seed std of the IBS values, but
-      they are small in absolute terms.
+      They are larger than the seed std of the IBS values (at most 0.0010),
+      but they are small in absolute terms.
+    * The size of the gain depends on the shared starting point. A rerun in
+      which all modes started from a different shared starting point moved
+      the mean gains by up to 0.0014 (0.0027 at size 32 and 0.0036 at size 64
+      against shared). Patient still won all 6 pairs.
     * Only two hidden sizes were tried. The test set was used once per run,
       after the best validation epoch was restored.
 

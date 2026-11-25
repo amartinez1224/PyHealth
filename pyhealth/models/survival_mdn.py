@@ -95,7 +95,9 @@ class SurvivalMDN(BaseModel):
             from each patient's features. ``"shared"`` learns one weight vector
             used for every patient. ``"uniform"`` fixes every weight to ``1/K``
             and has no weight parameters. The last two modes exist for ablation
-            studies of patient-specific weights.
+            studies of patient-specific weights. With the same random seed, all
+            three modes start with identical hidden layers and mean and scale
+            heads.
 
     Notes:
         Mean head weights start at zero and biases at evenly spaced centers
@@ -235,9 +237,10 @@ class SurvivalMDN(BaseModel):
             layers.append(nn.PReLU() if activation == "prelu" else nn.ReLU())
             width = hidden_width
         self.hidden = nn.Sequential(*layers)
-        # Only create weight parameters for the chosen mode.
+        # Build in every mode so all modes start with the same other weights.
+        weight_head = nn.Linear(width, n_components)
         if weight_mode == "patient":
-            self.weight_head = nn.Linear(width, n_components)
+            self.weight_head = weight_head
         elif weight_mode == "shared":
             self.shared_weight_logits = nn.Parameter(torch.zeros(n_components))
         self.mean_head = nn.Linear(width, n_components)

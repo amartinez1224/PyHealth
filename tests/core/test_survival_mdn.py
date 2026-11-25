@@ -906,6 +906,25 @@ class TestWeightModes(unittest.TestCase):
         self.assertEqual(curves.shape, (4, 3))
         self.assertEqual(curves.dtype, torch.float64)
 
+    def test_same_seed_gives_identical_shared_parameters(self):
+        # Only the mixture weights may differ between modes, so the ablation
+        # compares weight modes and not different random starting points.
+        states = {mode: self._model(mode).state_dict() for mode in self.MODES}
+        common = [
+            key for key in states["patient"] if not key.startswith("weight_head.")
+        ]
+        for prefix in ("hidden.", "mean_head.", "scale_head."):
+            self.assertTrue(any(key.startswith(prefix) for key in common))
+        for mode in ("shared", "uniform"):
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    set(states[mode]) - {"shared_weight_logits"}, set(common)
+                )
+                for key in common:
+                    torch.testing.assert_close(
+                        states[mode][key], states["patient"][key], atol=0, rtol=0
+                    )
+
     def test_checkpoint_round_trip_for_each_mode(self):
         weight_keys = {
             "patient": {"weight_head.weight", "weight_head.bias"},
