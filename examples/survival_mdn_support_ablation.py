@@ -107,11 +107,11 @@ Results:
 
     Command used to produce these results:
 
-        python examples/support_survival_prediction_survival_mdn.py \
+        python examples/survival_mdn_support_ablation.py \
             --data-dir ~/data/support --output-dir output/weight-ablation
 
 Usage:
-    python examples/support_survival_prediction_survival_mdn.py --synthetic \
+    python examples/survival_mdn_support_ablation.py --synthetic \
         --epochs 2 --output-dir output/weight-ablation-smoke
 """
 

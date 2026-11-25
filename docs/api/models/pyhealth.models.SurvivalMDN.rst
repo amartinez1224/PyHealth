@@ -159,7 +159,7 @@ Means and scales are patient-specific in every mode.
 * ``"uniform"``: every weight is fixed at ``1/K``. The model has no weight
   parameters and no ``weight_head``.
 
-Any other value raises ``ValueError``. ``examples/support_survival_prediction_survival_mdn.py``
+Any other value raises ``ValueError``. ``examples/survival_mdn_support_ablation.py``
 runs the three modes against each other on SUPPORT.
 
 Architecture and training
