@@ -143,6 +143,10 @@ walkthrough. It reuses this adapter to inspect local archives, check tensor
 contracts, train or load the frozen baseline, plot validation history and
 aggregate survival curves, and verify every prediction array/checkpoint tensor
 against prediction-only replay. Individual-row plots are disabled by default.
+Its last section shows how to select the `uniform`, `shared` and `patient`
+mixture-weight modes and how to read the matched differences saved by
+[survival_mdn_support_ablation.py](survival_mdn_support_ablation.py). The script
+runs the full experiment; the notebook only displays its saved results.
 
 The notebook defaults to the existing `output/support-baseline` run. Set its
 local data/run paths in setup, or explicitly enable `RUN_TRAINING` to train into
@@ -151,12 +155,15 @@ opt-in in the command-line adapter. Use the documented Jupyter kernel setup,
 and clear outputs before committing or sharing; keep executed notebooks and run
 artifacts local.
 
-Notebook verification executed all eight code cells in both existing-run and
+Notebook verification executed every code cell in sections 1–6 in both existing-run and
 fresh-training modes, including optional individual-row plotting in the local
 verification copy. The validation-history and aggregate-curve plots were
 visually inspected. Each replay matched all eight export arrays and 16
 checkpoint tensors for all 1727 rows; fresh notebook training also matched the
-recorded frozen baseline exactly. The committed notebook has no outputs.
+recorded frozen baseline exactly. The section 7 cells were run against
+the released split-1 data and the full 18-run ablation output; their tables
+match the results recorded in the ablation script. The committed notebook has
+no outputs.
 
 ## Commands and artifacts
 
