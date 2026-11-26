@@ -130,7 +130,9 @@ class Support2TimeToEvent(BaseTask):
     Examples:
         >>> from pyhealth.datasets import PatientSplit, Support2Dataset
         >>> from pyhealth.tasks import Support2TimeToEvent
-        >>> dataset = Support2Dataset(root="/path/to/prepared/data", tables=["support2"])
+        >>> dataset = Support2Dataset(  # doctest: +SKIP
+        ...     root="/path/to/prepared/data", tables=["support2"]
+        ... )
         >>> train, val, test = dataset.set_task(  # doctest: +SKIP
         ...     Support2TimeToEvent(), split=PatientSplit((0.70, 0.15, 0.15), seed=0)
         ... )
