@@ -289,7 +289,13 @@ class TestSupport2TimeToEvent(unittest.TestCase):
             torch.manual_seed(19)
             model = SurvivalMDN(train, hidden_dims=(8,), n_components=2)
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-        batch = next(iter(get_dataloader(train, batch_size=8)))
+        train_loader = get_dataloader(train, batch_size=8)
+        native_batch = next(iter(train_loader))
+        batch = next(iter(example.ModelTimeLoader(train_loader)))
+        assert batch["patient_id"] == native_batch["patient_id"]
+        torch.testing.assert_close(
+            batch["duration"], native_batch["duration"] / 365, rtol=0, atol=0
+        )
         loss = model(**batch)["loss"]
         assert torch.isfinite(loss)
         loss.backward()
