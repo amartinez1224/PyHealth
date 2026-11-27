@@ -802,6 +802,16 @@ class TestAblationHelpers(unittest.TestCase):
             ablation.parse_args(argv)
         self.assertTrue(ablation.parse_args(argv + ["--overwrite"]).overwrite)
 
+    def test_duplicate_experiment_arguments_are_rejected(self):
+        argv = ["--synthetic", "--output-dir", str(self.output)]
+        for option in (
+            ["--seeds", "0", "0"],
+            ["--hidden-sizes", "32", "64", "32"],
+            ["--weight-modes", "patient", "patient"],
+        ):
+            with self.subTest(option=option[0]), self.assertRaises(SystemExit):
+                ablation.parse_args(argv + option)
+
 
 if __name__ == "__main__":
     unittest.main()

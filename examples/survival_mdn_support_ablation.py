@@ -441,6 +441,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("epochs and patience must be positive")
     if any(seed < 0 for seed in args.seeds) or any(h < 1 for h in args.hidden_sizes):
         parser.error("seeds must be non-negative and hidden sizes positive")
+    # Each configuration must run only once.
+    for option, values in (
+        ("--seeds", args.seeds),
+        ("--hidden-sizes", args.hidden_sizes),
+        ("--weight-modes", args.weight_modes),
+    ):
+        if len(set(values)) != len(values):
+            parser.error(f"{option} has duplicate values: {' '.join(map(str, values))}")
     existing = [
         name for name in (*CSV_FILES, MARKER_FILE) if (args.output_dir / name).exists()
     ]
