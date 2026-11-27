@@ -122,9 +122,11 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import random
 import time
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -157,6 +159,9 @@ CUTOFFS = (1e-8, 0.2, 0.4)
 METRICS = ("ibs", "c_index", "ibll")
 # Pairs of modes to compare (patient minus the other mode).
 DIFFERENCES = (("patient", "shared"), ("patient", "uniform"))
+# Output files. The marker is written last and holds the run id of the tables.
+CSV_FILES = ("runs.csv", "summary.csv", "matched_differences.csv")
+MARKER_FILE = "run_complete.json"
 
 
 def set_seed(seed: int) -> None:
@@ -345,10 +350,10 @@ def matched_differences(results: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         Table indexed by (comparison, hidden_size) with the mean and std over
-        seeds of each metric difference. Comparisons whose modes are missing
-        from ``results`` are skipped, so the table is empty (with the same
-        index and columns) when no comparison can be made, for example in a
-        uniform-only run.
+        seeds of each metric difference. Incomplete pairs are skipped.
+        Comparisons whose modes are missing from ``results`` are skipped, so
+        the table is empty (with the same index and columns) when no
+        comparison can be made, for example in a uniform-only run.
     """
     columns = metric_columns(results)
     table_columns = ["comparison", "hidden_size", "n_pairs"] + [
@@ -361,6 +366,8 @@ def matched_differences(results: pd.DataFrame) -> pd.DataFrame:
         if left not in modes or right not in modes:
             continue
         diff = wide.xs(left, level="weight_mode") - wide.xs(right, level="weight_mode")
+        # Drop incomplete pairs.
+        diff = diff.dropna()
         for hidden_size, group in diff.groupby(level="hidden_size"):
             row = {"comparison": f"{left} - {right}", "hidden_size": hidden_size}
             row["n_pairs"] = len(group)
@@ -422,6 +429,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=HIDDEN_SIZES,
         help="Width of each of the three hidden layers",
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Delete results already in --output-dir before running",
+    )
     args = parser.parse_args(argv)
     if not args.synthetic and args.data_dir is None:
         parser.error("provide --data-dir or --synthetic")
@@ -429,6 +441,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("epochs and patience must be positive")
     if any(seed < 0 for seed in args.seeds) or any(h < 1 for h in args.hidden_sizes):
         parser.error("seeds must be non-negative and hidden sizes positive")
+    existing = [
+        name for name in (*CSV_FILES, MARKER_FILE) if (args.output_dir / name).exists()
+    ]
+    if existing and not args.overwrite:
+        parser.error(
+            f"{args.output_dir} already has {', '.join(existing)}. "
+            "Use a new --output-dir, or pass --overwrite to delete them first."
+        )
     return args
 
 
@@ -439,7 +459,8 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
         argv: Argument list; defaults to ``sys.argv[1:]``.
 
     Returns:
-        Per-run results table, also saved as ``runs.csv``.
+        Per-run results table, also saved as ``runs.csv``. All output files
+        share one ``run_id``.
     """
     args = parse_args(argv)
     # Same settings as the baseline script, so results are repeatable.
@@ -451,6 +472,11 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
     else:
         datasets = load_support_split(args.data_dir, split=1)["datasets"]
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.overwrite:
+        # Marker first, so a stopped rerun never looks complete.
+        for name in (MARKER_FILE, *CSV_FILES):
+            (args.output_dir / name).unlink(missing_ok=True)
+    run_id = uuid.uuid4().hex
     configs = [
         (mode, size, seed)
         for size in args.hidden_sizes
@@ -459,7 +485,10 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
     ]
     rows = []
     for number, (mode, size, seed) in enumerate(configs, start=1):
-        row = run_once(datasets, mode, size, seed, args.epochs, args.patience)
+        row = {
+            "run_id": run_id,
+            **run_once(datasets, mode, size, seed, args.epochs, args.patience),
+        }
         rows.append(row)
         print(
             f"[{number}/{len(configs)}] {mode:8s} hidden={size:3d} seed={seed} "
@@ -470,12 +499,21 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
         pd.DataFrame(rows).to_csv(args.output_dir / "runs.csv", index=False)
     results = pd.DataFrame(rows)
     summary = summarize(results)
-    summary.to_csv(args.output_dir / "summary.csv")
+    summary.assign(run_id=run_id).to_csv(args.output_dir / "summary.csv")
     print("\nMean ± std across seeds (test set, cutoff 1e-8):")
     print(format_table(summary, [*METRICS, "n_params", "best_epoch"]))
     differences = matched_differences(results)
     # Always write it, so a rerun never leaves an older file behind.
-    differences.to_csv(args.output_dir / "matched_differences.csv")
+    differences.assign(run_id=run_id).to_csv(
+        args.output_dir / "matched_differences.csv"
+    )
+    # Written last, after all three tables.
+    arguments = {
+        name: str(value) if isinstance(value, Path) else value
+        for name, value in vars(args).items()
+    }
+    marker = {"run_id": run_id, "arguments": arguments, "files": list(CSV_FILES)}
+    (args.output_dir / MARKER_FILE).write_text(json.dumps(marker, indent=2) + "\n")
     if len(differences):
         print("\nMatched differences (same seed and hidden size):")
         print("IBS < 0 favors the first mode; C-index and IBLL > 0 do.")

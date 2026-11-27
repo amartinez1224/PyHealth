@@ -3,12 +3,14 @@
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import torch
 
 from pyhealth.datasets import get_dataloader
@@ -20,6 +22,15 @@ SPEC = importlib.util.spec_from_file_location(
 )
 support = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(support)
+
+# The ablation script imports survival_mdn_support by name.
+sys.modules.setdefault("survival_mdn_support", support)
+ABLATION_SPEC = importlib.util.spec_from_file_location(
+    "support_ablation_example",
+    Path(__file__).resolve().parents[2] / "examples/survival_mdn_support_ablation.py",
+)
+ablation = importlib.util.module_from_spec(ABLATION_SPEC)
+ABLATION_SPEC.loader.exec_module(ablation)
 
 
 class TestSupportEnvironment(unittest.TestCase):
@@ -759,6 +770,37 @@ class TestSupportLoader(unittest.TestCase):
                     + option
                 )
         self.assertFalse((self.root / "invalid").exists())
+
+
+class TestAblationHelpers(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.output = Path(self.temporary.name)
+
+    def test_matched_differences_skip_incomplete_pairs(self):
+        rows = [
+            {"weight_mode": mode, "hidden_size": 32, "seed": seed, "ibs": ibs}
+            for mode, seed, ibs in (
+                ("patient", 0, 0.18),
+                ("shared", 0, 0.19),
+                ("patient", 1, 0.17),
+                ("shared", 1, np.nan),
+                ("patient", 2, 0.16),
+            )
+        ]
+        table = ablation.matched_differences(pd.DataFrame(rows))
+        row = table.loc[("patient - shared", 32)]
+        self.assertEqual(row["n_pairs"], 1)
+        self.assertAlmostEqual(row["ibs_mean"], -0.01)
+
+    def test_existing_results_need_overwrite(self):
+        argv = ["--synthetic", "--output-dir", str(self.output)]
+        ablation.parse_args(argv)
+        (self.output / "runs.csv").write_text("run_id\n")
+        with self.assertRaises(SystemExit):
+            ablation.parse_args(argv)
+        self.assertTrue(ablation.parse_args(argv + ["--overwrite"]).overwrite)
 
 
 if __name__ == "__main__":
