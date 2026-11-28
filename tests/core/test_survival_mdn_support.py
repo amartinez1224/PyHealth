@@ -831,6 +831,24 @@ class TestAblationHelpers(unittest.TestCase):
                 marker.write_text(damaged)
                 self.assertFalse(ablation.is_complete_run(self.output))
 
+    def test_loaded_tables_are_the_checked_bytes(self):
+        for name in ablation.CSV_FILES:
+            (self.output / name).write_text("weight_mode\npatient\n")
+        ablation.write_marker(self.output, {"synthetic": True})
+        read_csv = pd.read_csv
+
+        def rewrite_then_parse(source):
+            # Another run replaces every table after the hash check.
+            for name in ablation.CSV_FILES:
+                (self.output / name).write_text("weight_mode\nshared\n")
+            return read_csv(source)
+
+        with patch.object(ablation.pd, "read_csv", side_effect=rewrite_then_parse):
+            tables = ablation.load_complete_run(self.output)
+        for name in ablation.CSV_FILES:
+            self.assertEqual(tables[name]["weight_mode"].tolist(), ["patient"], name)
+        self.assertEqual(tables["arguments"], {"synthetic": True})
+
     def test_output_dir_is_reserved_for_one_run(self):
         self.reserve(self.argv)
         with self.assertRaises(SystemExit):

@@ -123,6 +123,7 @@ Usage:
 
 import argparse
 import hashlib
+import io
 import json
 import logging
 import os
@@ -436,6 +437,36 @@ def write_marker(output_dir: Path, arguments: dict) -> None:
     os.replace(temporary, output_dir / MARKER_FILE)
 
 
+def load_complete_run(output_dir: Path) -> dict | None:
+    """Load the tables of one completed run.
+
+    Each file is read once. The tables are parsed from the same bytes whose
+    hash was checked, so a run that rewrites the directory meanwhile cannot
+    mix its files into the result.
+
+    Args:
+        output_dir: Directory written by :func:`main`.
+
+    Returns:
+        ``None`` unless ``run_complete.json`` is valid and every table matches
+        the hash stored in it. Otherwise a dict mapping each CSV file name to
+        its table, plus ``"arguments"`` with the arguments of the run.
+    """
+    try:
+        marker = json.loads((output_dir / MARKER_FILE).read_text())
+        contents = {name: (output_dir / name).read_bytes() for name in CSV_FILES}
+    except (OSError, ValueError):
+        return None
+    hashes = marker.get("sha256") if isinstance(marker, dict) else None
+    if not isinstance(hashes, dict):
+        return None
+    for name, data in contents.items():
+        if hashlib.sha256(data).hexdigest() != hashes.get(name):
+            return None
+    tables = {name: pd.read_csv(io.BytesIO(data)) for name, data in contents.items()}
+    return {**tables, "arguments": marker.get("arguments", {})}
+
+
 def is_complete_run(output_dir: Path) -> bool:
     """Check that the tables in a directory come from one completed run.
 
@@ -446,21 +477,7 @@ def is_complete_run(output_dir: Path) -> bool:
         True if ``run_complete.json`` exists and every table matches the
         hash stored in it.
     """
-    marker_path = output_dir / MARKER_FILE
-    if not marker_path.is_file():
-        return False
-    try:
-        marker = json.loads(marker_path.read_text())
-    except (OSError, ValueError):
-        return False
-    hashes = marker.get("sha256") if isinstance(marker, dict) else None
-    if not isinstance(hashes, dict):
-        return False
-    for name in CSV_FILES:
-        path = output_dir / name
-        if not path.is_file() or file_sha256(path) != hashes.get(name):
-            return False
-    return True
+    return load_complete_run(output_dir) is not None
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
