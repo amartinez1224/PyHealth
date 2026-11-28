@@ -808,9 +808,10 @@ class TestAblationHelpers(unittest.TestCase):
         (self.output / "runs.csv").write_text("run_id\n")
         with self.assertRaises(SystemExit):
             ablation.parse_args(self.argv)
-        # --overwrite is accepted and deletes the old results.
+        # --overwrite is accepted. main() deletes the old results later, once
+        # the data has loaded.
         self.assertTrue(self.reserve(self.argv + ["--overwrite"]).overwrite)
-        self.assertFalse((self.output / "runs.csv").exists())
+        self.assertTrue((self.output / "runs.csv").exists())
 
     def test_header_only_table_from_another_run_is_rejected(self):
         for name in ablation.CSV_FILES:
@@ -877,13 +878,31 @@ class TestAblationHelpers(unittest.TestCase):
         for name in results:
             self.assertTrue((self.output / name).exists(), name)
 
-    def test_main_writes_complete_run_and_frees_lock(self):
-        # main() changes these for the whole process; put them back afterwards.
+    def restore_torch_settings(self):
+        """main() changes these for the whole process; put them back afterwards."""
         self.addCleanup(torch.set_num_threads, torch.get_num_threads())
         self.addCleanup(
             torch.use_deterministic_algorithms,
             torch.are_deterministic_algorithms_enabled(),
         )
+
+    def test_corrupt_data_keeps_old_results(self):
+        self.restore_torch_settings()
+        results = (*ablation.CSV_FILES, ablation.MARKER_FILE)
+        for name in results:
+            (self.output / name).write_text("old\n")
+        data = self.output / "data"
+        data.mkdir()
+        for name in ("train_1.npz", "valid_1.npz", "test_1.npz"):
+            (data / name).write_bytes(b"not an npz file")
+        argv = ["--data-dir", str(data), "--output-dir", str(self.output)]
+        with self.assertRaises(ValueError):
+            ablation.main(argv + ["--overwrite"])
+        for name in results:
+            self.assertTrue((self.output / name).exists(), name)
+
+    def test_main_writes_complete_run_and_frees_lock(self):
+        self.restore_torch_settings()
         ablation.main(self.argv + ["--epochs", "1", "--seeds", "0", "--hidden-sizes", "8"])
         self.assertTrue(ablation.is_complete_run(self.output))
         # Acquiring with no wait raises Timeout if the lock is still held.

@@ -563,10 +563,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             f"{args.output_dir} already has {', '.join(existing)}. "
             "Use a new --output-dir, or pass --overwrite to delete them first."
         )
-    if args.overwrite:
-        # Marker first, so a stopped rerun never looks complete.
-        for name in (MARKER_FILE, *CSV_FILES):
-            (args.output_dir / name).unlink(missing_ok=True)
     return args
 
 
@@ -605,6 +601,11 @@ def _run(args: argparse.Namespace) -> pd.DataFrame:
         datasets = make_synthetic_datasets()
     else:
         datasets = load_support_split(args.data_dir, split=1)["datasets"]
+    if args.overwrite:
+        # Only now that the data loaded. Marker first, so a stopped rerun
+        # never looks complete.
+        for name in (MARKER_FILE, *CSV_FILES):
+            (args.output_dir / name).unlink(missing_ok=True)
     configs = [
         (mode, size, seed)
         for size in args.hidden_sizes
