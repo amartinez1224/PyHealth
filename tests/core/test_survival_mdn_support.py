@@ -797,10 +797,15 @@ class TestAblationHelpers(unittest.TestCase):
     def test_existing_results_need_overwrite(self):
         argv = ["--synthetic", "--output-dir", str(self.output)]
         ablation.parse_args(argv)
+        # The first run finished: its lock is gone and its results remain.
+        (self.output / ablation.LOCK_FILE).unlink()
         (self.output / "runs.csv").write_text("run_id\n")
         with self.assertRaises(SystemExit):
             ablation.parse_args(argv)
+        # A refused run must not leave its lock behind.
+        self.assertFalse((self.output / ablation.LOCK_FILE).exists())
         self.assertTrue(ablation.parse_args(argv + ["--overwrite"]).overwrite)
+        self.assertFalse((self.output / "runs.csv").exists())
 
     def test_header_only_table_from_another_run_is_rejected(self):
         for name in ablation.CSV_FILES:
@@ -809,6 +814,12 @@ class TestAblationHelpers(unittest.TestCase):
         self.assertTrue(ablation.is_complete_run(self.output))
         (self.output / "matched_differences.csv").write_text("comparison,hidden_size\n")
         self.assertFalse(ablation.is_complete_run(self.output))
+
+    def test_output_dir_is_reserved_for_one_run(self):
+        argv = ["--synthetic", "--output-dir", str(self.output)]
+        ablation.parse_args(argv)
+        with self.assertRaises(SystemExit):
+            ablation.parse_args(argv)
 
     def test_duplicate_experiment_arguments_are_rejected(self):
         argv = ["--synthetic", "--output-dir", str(self.output)]

@@ -162,6 +162,8 @@ DIFFERENCES = (("patient", "shared"), ("patient", "uniform"))
 # Output files. The marker is written last and holds the SHA-256 of each table.
 CSV_FILES = ("runs.csv", "summary.csv", "matched_differences.csv")
 MARKER_FILE = "run_complete.json"
+# Created atomically at start so only one run writes to a directory.
+LOCK_FILE = "run.lock"
 
 
 def set_seed(seed: int) -> None:
@@ -450,13 +452,13 @@ def is_complete_run(output_dir: Path) -> bool:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse and validate command line arguments.
+    """Parse and validate command line arguments, then reserve the output dir.
 
     Args:
         argv: Argument list; defaults to ``sys.argv[1:]``.
 
     Returns:
-        Parsed arguments.
+        Parsed arguments. ``--output-dir`` exists and holds ``run.lock``.
     """
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--data-dir", type=Path, help="Released SUPPORT files")
@@ -482,7 +484,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Delete results already in --output-dir before running",
+        help=(
+            "Delete results and the lock in --output-dir before running. "
+            "Only use when no other run is writing to this directory."
+        ),
     )
     args = parser.parse_args(argv)
     if not args.synthetic and args.data_dir is None:
@@ -499,14 +504,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ):
         if len(set(values)) != len(values):
             parser.error(f"{option} has duplicate values: {' '.join(map(str, values))}")
+    # Take the lock before looking at the results in the directory.
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    lock = args.output_dir / LOCK_FILE
+    if args.overwrite:
+        lock.unlink(missing_ok=True)
+    try:
+        open(lock, "x").close()
+    except FileExistsError:
+        parser.error(
+            f"{args.output_dir} is locked by another run ({LOCK_FILE}). "
+            "If no run is using it, rerun with --overwrite."
+        )
     existing = [
         name for name in (*CSV_FILES, MARKER_FILE) if (args.output_dir / name).exists()
     ]
     if existing and not args.overwrite:
+        lock.unlink()
         parser.error(
             f"{args.output_dir} already has {', '.join(existing)}. "
             "Use a new --output-dir, or pass --overwrite to delete them first."
         )
+    if args.overwrite:
+        # Marker first, so a stopped rerun never looks complete.
+        for name in (MARKER_FILE, *CSV_FILES):
+            (args.output_dir / name).unlink(missing_ok=True)
     return args
 
 
@@ -528,11 +550,6 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
         datasets = make_synthetic_datasets()
     else:
         datasets = load_support_split(args.data_dir, split=1)["datasets"]
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    if args.overwrite:
-        # Marker first, so a stopped rerun never looks complete.
-        for name in (MARKER_FILE, *CSV_FILES):
-            (args.output_dir / name).unlink(missing_ok=True)
     configs = [
         (mode, size, seed)
         for size in args.hidden_sizes
@@ -559,6 +576,7 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
     # Always write it, so a rerun never leaves an older file behind.
     differences.to_csv(args.output_dir / "matched_differences.csv")
     write_marker(args.output_dir, vars(args))
+    (args.output_dir / LOCK_FILE).unlink()
     if len(differences):
         print("\nMatched differences (same seed and hidden size):")
         print("IBS < 0 favors the first mode; C-index and IBLL > 0 do.")
