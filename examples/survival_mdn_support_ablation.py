@@ -507,6 +507,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ):
         if len(set(values)) != len(values):
             parser.error(f"{option} has duplicate values: {' '.join(map(str, values))}")
+    # Check the data before touching the output dir, so --overwrite never
+    # deletes results for a run that cannot start.
+    if not args.synthetic:
+        missing = [
+            name
+            for name in ("train_1.npz", "valid_1.npz", "test_1.npz")
+            if not (args.data_dir / name).is_file()
+        ]
+        if missing:
+            parser.error(f"--data-dir {args.data_dir} is missing {', '.join(missing)}")
     # Take the lock before looking at the results in the directory.
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.lock = FileLock(args.output_dir / LOCK_FILE)

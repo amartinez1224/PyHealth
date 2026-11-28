@@ -837,6 +837,16 @@ class TestAblationHelpers(unittest.TestCase):
         # The live run's results were not deleted.
         self.assertTrue((self.output / "runs.csv").exists())
 
+    def test_missing_data_dir_keeps_old_results(self):
+        results = (*ablation.CSV_FILES, ablation.MARKER_FILE)
+        for name in results:
+            (self.output / name).write_text("old\n")
+        argv = ["--data-dir", str(self.output / "missing"), "--overwrite"]
+        with self.assertRaises(SystemExit):
+            ablation.parse_args(argv + ["--output-dir", str(self.output)])
+        for name in results:
+            self.assertTrue((self.output / name).exists(), name)
+
     def test_duplicate_experiment_arguments_are_rejected(self):
         argv = ["--synthetic", "--output-dir", str(self.output)]
         for option in (
