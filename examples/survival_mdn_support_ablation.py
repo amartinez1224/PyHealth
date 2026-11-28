@@ -125,6 +125,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import random
 import time
 from collections.abc import Sequence
@@ -429,7 +430,10 @@ def write_marker(output_dir: Path, arguments: dict) -> None:
         hashes[name] = file_sha256(output_dir / name)
     marker = {"arguments": arguments, "sha256": hashes}
     text = json.dumps(marker, indent=2, default=str)
-    (output_dir / MARKER_FILE).write_text(text + "\n")
+    # Write a temp file and swap it in, so a stopped run never leaves half a marker.
+    temporary = output_dir / f"{MARKER_FILE}.tmp"
+    temporary.write_text(text + "\n")
+    os.replace(temporary, output_dir / MARKER_FILE)
 
 
 def is_complete_run(output_dir: Path) -> bool:
@@ -445,7 +449,13 @@ def is_complete_run(output_dir: Path) -> bool:
     marker_path = output_dir / MARKER_FILE
     if not marker_path.is_file():
         return False
-    hashes = json.loads(marker_path.read_text()).get("sha256", {})
+    try:
+        marker = json.loads(marker_path.read_text())
+    except (OSError, ValueError):
+        return False
+    hashes = marker.get("sha256") if isinstance(marker, dict) else None
+    if not isinstance(hashes, dict):
+        return False
     for name in CSV_FILES:
         path = output_dir / name
         if not path.is_file() or file_sha256(path) != hashes.get(name):

@@ -819,6 +819,17 @@ class TestAblationHelpers(unittest.TestCase):
         (self.output / "matched_differences.csv").write_text("comparison,hidden_size\n")
         self.assertFalse(ablation.is_complete_run(self.output))
 
+    def test_damaged_marker_is_rejected(self):
+        for name in ablation.CSV_FILES:
+            (self.output / name).write_text("weight_mode\npatient\n")
+        ablation.write_marker(self.output, {"synthetic": True})
+        marker = self.output / ablation.MARKER_FILE
+        text = marker.read_text()
+        for damaged in (text[:40], '{"sha256": []}'):
+            with self.subTest(marker=damaged):
+                marker.write_text(damaged)
+                self.assertFalse(ablation.is_complete_run(self.output))
+
     def test_output_dir_is_reserved_for_one_run(self):
         self.reserve(self.argv)
         with self.assertRaises(SystemExit):
