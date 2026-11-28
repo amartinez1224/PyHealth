@@ -777,6 +777,13 @@ class TestAblationHelpers(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.output = Path(self.temporary.name)
+        self.argv = ["--synthetic", "--output-dir", str(self.output)]
+
+    def reserve(self, argv):
+        """Parse arguments and release the lock they take after the test."""
+        args = ablation.parse_args(argv)
+        self.addCleanup(args.lock.release)
+        return args
 
     def test_matched_differences_skip_incomplete_pairs(self):
         rows = [
@@ -795,16 +802,13 @@ class TestAblationHelpers(unittest.TestCase):
         self.assertAlmostEqual(row["ibs_mean"], -0.01)
 
     def test_existing_results_need_overwrite(self):
-        argv = ["--synthetic", "--output-dir", str(self.output)]
-        ablation.parse_args(argv)
-        # The first run finished: its lock is gone and its results remain.
-        (self.output / ablation.LOCK_FILE).unlink()
+        # The first run finished: its lock is released and its results remain.
+        self.reserve(self.argv).lock.release()
         (self.output / "runs.csv").write_text("run_id\n")
         with self.assertRaises(SystemExit):
-            ablation.parse_args(argv)
-        # A refused run must not leave its lock behind.
-        self.assertFalse((self.output / ablation.LOCK_FILE).exists())
-        self.assertTrue(ablation.parse_args(argv + ["--overwrite"]).overwrite)
+            ablation.parse_args(self.argv)
+        # The refused run released its lock, so --overwrite can take it.
+        self.assertTrue(self.reserve(self.argv + ["--overwrite"]).overwrite)
         self.assertFalse((self.output / "runs.csv").exists())
 
     def test_header_only_table_from_another_run_is_rejected(self):
@@ -816,10 +820,22 @@ class TestAblationHelpers(unittest.TestCase):
         self.assertFalse(ablation.is_complete_run(self.output))
 
     def test_output_dir_is_reserved_for_one_run(self):
-        argv = ["--synthetic", "--output-dir", str(self.output)]
-        ablation.parse_args(argv)
+        self.reserve(self.argv)
         with self.assertRaises(SystemExit):
-            ablation.parse_args(argv)
+            ablation.parse_args(self.argv)
+
+    def test_lock_file_from_dead_process_does_not_block(self):
+        # A crashed run leaves the file, but nothing holds the OS lock.
+        (self.output / ablation.LOCK_FILE).touch()
+        self.assertTrue(self.reserve(self.argv).lock.is_locked)
+
+    def test_overwrite_cannot_take_folder_in_use(self):
+        self.reserve(self.argv)
+        (self.output / "runs.csv").write_text("run_id\n")
+        with self.assertRaises(SystemExit):
+            ablation.parse_args(self.argv + ["--overwrite"])
+        # The live run's results were not deleted.
+        self.assertTrue((self.output / "runs.csv").exists())
 
     def test_duplicate_experiment_arguments_are_rejected(self):
         argv = ["--synthetic", "--output-dir", str(self.output)]

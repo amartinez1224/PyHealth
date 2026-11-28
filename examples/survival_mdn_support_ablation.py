@@ -133,6 +133,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from filelock import FileLock, Timeout
 
 # Reuse the SUPPORT loader and metrics from the baseline script.
 from survival_mdn_support import (
@@ -162,7 +163,8 @@ DIFFERENCES = (("patient", "shared"), ("patient", "uniform"))
 # Output files. The marker is written last and holds the SHA-256 of each table.
 CSV_FILES = ("runs.csv", "summary.csv", "matched_differences.csv")
 MARKER_FILE = "run_complete.json"
-# Created atomically at start so only one run writes to a directory.
+# Locked by the OS for the whole run so only one run writes to a directory.
+# The OS releases it when the process exits, so a leftover file never blocks.
 LOCK_FILE = "run.lock"
 
 
@@ -458,7 +460,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         argv: Argument list; defaults to ``sys.argv[1:]``.
 
     Returns:
-        Parsed arguments. ``--output-dir`` exists and holds ``run.lock``.
+        Parsed arguments. ``args.lock`` is a held lock on ``--output-dir``;
+        the caller releases it when the run ends.
     """
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--data-dir", type=Path, help="Released SUPPORT files")
@@ -485,8 +488,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help=(
-            "Delete results and the lock in --output-dir before running. "
-            "Only use when no other run is writing to this directory."
+            "Delete old results in --output-dir before running. A directory "
+            "in use by another run is still refused."
         ),
     )
     args = parser.parse_args(argv)
@@ -506,21 +509,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             parser.error(f"{option} has duplicate values: {' '.join(map(str, values))}")
     # Take the lock before looking at the results in the directory.
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    lock = args.output_dir / LOCK_FILE
-    if args.overwrite:
-        lock.unlink(missing_ok=True)
+    args.lock = FileLock(args.output_dir / LOCK_FILE)
     try:
-        open(lock, "x").close()
-    except FileExistsError:
+        args.lock.acquire(timeout=0)
+    except Timeout:
         parser.error(
-            f"{args.output_dir} is locked by another run ({LOCK_FILE}). "
-            "If no run is using it, rerun with --overwrite."
+            f"{args.output_dir} is in use by another run (it holds {LOCK_FILE}). "
+            "Wait for that run to finish, or use a new --output-dir."
         )
     existing = [
         name for name in (*CSV_FILES, MARKER_FILE) if (args.output_dir / name).exists()
     ]
     if existing and not args.overwrite:
-        lock.unlink()
+        args.lock.release()
         parser.error(
             f"{args.output_dir} already has {', '.join(existing)}. "
             "Use a new --output-dir, or pass --overwrite to delete them first."
@@ -542,6 +543,23 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
         Per-run results table, also saved as ``runs.csv``.
     """
     args = parse_args(argv)
+    lock = args.lock
+    del args.lock  # Keep it out of the arguments saved in the marker.
+    try:
+        return _run(args)
+    finally:
+        lock.release()
+
+
+def _run(args: argparse.Namespace) -> pd.DataFrame:
+    """Run every configuration and write the tables and the marker.
+
+    Args:
+        args: Arguments from :func:`parse_args`, with the output dir locked.
+
+    Returns:
+        Per-run results table.
+    """
     # Same settings as the baseline script, so results are repeatable.
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
@@ -576,7 +594,6 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
     # Always write it, so a rerun never leaves an older file behind.
     differences.to_csv(args.output_dir / "matched_differences.csv")
     write_marker(args.output_dir, vars(args))
-    (args.output_dir / LOCK_FILE).unlink()
     if len(differences):
         print("\nMatched differences (same seed and hidden size):")
         print("IBS < 0 favors the first mode; C-index and IBLL > 0 do.")
