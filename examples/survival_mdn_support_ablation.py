@@ -14,6 +14,9 @@ Hypothesis:
 Experimental setup:
     * Data: released SUPPORT split 1 (train/valid/test), or ``--synthetic``
       random data of the same shape for a code check without the real files.
+      We use the split published with the Survival-MDN paper instead of
+      building one with PyHealth's ``Support2Dataset``, so the results stay
+      comparable to the paper.
     * Model: ``SurvivalMDN`` with ``n_components=5``. Means and scales are
       patient-specific in every run; only ``weight_mode`` changes:
       ``uniform`` (fixed 1/K), ``shared`` (one learned vector), ``patient``
@@ -144,6 +147,7 @@ from survival_mdn_support import (
     _evaluate_metrics,
     load_support_split,
 )
+from torch.utils.data import DataLoader
 
 from pyhealth.datasets import SampleDataset, create_sample_dataset, get_dataloader
 from pyhealth.models import SurvivalMDN
@@ -275,7 +279,15 @@ def run_once(
     validation_nll: list[float] = []
     evaluate = trainer.evaluate
 
-    def recording_evaluate(dataloader) -> dict[str, float]:
+    def recording_evaluate(dataloader: DataLoader) -> dict[str, float]:
+        """Evaluate as the trainer does and record the validation loss.
+
+        Args:
+            dataloader: Validation data loader.
+
+        Returns:
+            Scores from the trainer's own ``evaluate``.
+        """
         scores = evaluate(dataloader)
         validation_nll.append(scores["loss"])
         return scores

@@ -253,7 +253,24 @@ class SurvivalMDN(BaseModel):
                 else torch.zeros(1)
             )
 
-    def _convert(self, value, name, *, floating=False):
+    def _convert(
+        self, value: torch.Tensor, name: str, *, floating: bool = False
+    ) -> torch.Tensor:
+        """Check a raw input tensor and move it to the model device and dtype.
+
+        Args:
+            value: Input tensor from the batch.
+            name: Field name used in error messages.
+            floating: Whether the input must already be a floating tensor.
+
+        Returns:
+            The tensor on the model device, in the model dtype.
+
+        Raises:
+            TypeError: If ``value`` is not a tensor, is not floating when
+                ``floating`` is set, or the model dtype is not float32/float64.
+            ValueError: If ``value`` is complex or not finite after conversion.
+        """
         if not isinstance(value, torch.Tensor):
             raise TypeError(f"{name} must be a raw tensor, not a tuple/list.")
         if floating and not value.is_floating_point():
@@ -272,7 +289,14 @@ class SurvivalMDN(BaseModel):
         return value
 
     def _log_weights(self, hidden: torch.Tensor) -> torch.Tensor:
-        """Return [B, K] mixture log weights for the configured weight mode."""
+        """Return mixture log weights for the configured weight mode.
+
+        Args:
+            hidden: Output of the hidden layers, shape [B, H].
+
+        Returns:
+            Log weights of shape [B, K].
+        """
         batch_size = hidden.shape[0]
         if self.weight_mode == "patient":
             return F.log_softmax(self.weight_head(hidden), dim=-1)
@@ -286,7 +310,22 @@ class SurvivalMDN(BaseModel):
             device=hidden.device,
         )
 
-    def _parameters_from_features(self, kwargs):
+    def _parameters_from_features(
+        self, kwargs: dict[str, Any]
+    ) -> dict[str, torch.Tensor]:
+        """Predict the mixture parameters from the batch features.
+
+        Args:
+            kwargs: Batch fields; must contain the feature field.
+
+        Returns:
+            ``log_weights``, ``means`` and ``scales``, each of shape [B, K].
+
+        Raises:
+            ValueError: If the feature field is missing, has the wrong shape,
+                the batch is empty, a BatchNorm training batch has one patient,
+                or the predicted parameters are not finite.
+        """
         if self.feature_key not in kwargs:
             raise ValueError(f"Missing feature field {self.feature_key!r}.")
         features = self._convert(kwargs[self.feature_key], "features", floating=True)
