@@ -802,6 +802,14 @@ class TestAblationHelpers(unittest.TestCase):
             ablation.parse_args(argv)
         self.assertTrue(ablation.parse_args(argv + ["--overwrite"]).overwrite)
 
+    def test_header_only_table_from_another_run_is_rejected(self):
+        for name in ablation.CSV_FILES:
+            (self.output / name).write_text("comparison,hidden_size\npatient,32\n")
+        ablation.write_marker(self.output, {"synthetic": True})
+        self.assertTrue(ablation.is_complete_run(self.output))
+        (self.output / "matched_differences.csv").write_text("comparison,hidden_size\n")
+        self.assertFalse(ablation.is_complete_run(self.output))
+
     def test_duplicate_experiment_arguments_are_rejected(self):
         argv = ["--synthetic", "--output-dir", str(self.output)]
         for option in (

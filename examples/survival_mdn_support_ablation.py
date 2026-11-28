@@ -122,11 +122,11 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import random
 import time
-import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -159,7 +159,7 @@ CUTOFFS = (1e-8, 0.2, 0.4)
 METRICS = ("ibs", "c_index", "ibll")
 # Pairs of modes to compare (patient minus the other mode).
 DIFFERENCES = (("patient", "shared"), ("patient", "uniform"))
-# Output files. The marker is written last and holds the run id of the tables.
+# Output files. The marker is written last and holds the SHA-256 of each table.
 CSV_FILES = ("runs.csv", "summary.csv", "matched_differences.csv")
 MARKER_FILE = "run_complete.json"
 
@@ -399,6 +399,56 @@ def format_table(table: pd.DataFrame, columns: Sequence[str]) -> str:
     return shown.to_string()
 
 
+def file_sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of a file.
+
+    Args:
+        path: File to hash.
+
+    Returns:
+        Hex digest of the file's bytes.
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_marker(output_dir: Path, arguments: dict) -> None:
+    """Write ``run_complete.json`` with the hash of each result table.
+
+    Call it only after all three tables are written.
+
+    Args:
+        output_dir: Directory that holds the tables.
+        arguments: Command line arguments of the run.
+    """
+    hashes = {}
+    for name in CSV_FILES:
+        hashes[name] = file_sha256(output_dir / name)
+    marker = {"arguments": arguments, "sha256": hashes}
+    text = json.dumps(marker, indent=2, default=str)
+    (output_dir / MARKER_FILE).write_text(text + "\n")
+
+
+def is_complete_run(output_dir: Path) -> bool:
+    """Check that the tables in a directory come from one completed run.
+
+    Args:
+        output_dir: Directory written by :func:`main`.
+
+    Returns:
+        True if ``run_complete.json`` exists and every table matches the
+        hash stored in it.
+    """
+    marker_path = output_dir / MARKER_FILE
+    if not marker_path.is_file():
+        return False
+    hashes = json.loads(marker_path.read_text()).get("sha256", {})
+    for name in CSV_FILES:
+        path = output_dir / name
+        if not path.is_file() or file_sha256(path) != hashes.get(name):
+            return False
+    return True
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse and validate command line arguments.
 
@@ -467,8 +517,7 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
         argv: Argument list; defaults to ``sys.argv[1:]``.
 
     Returns:
-        Per-run results table, also saved as ``runs.csv``. All output files
-        share one ``run_id``.
+        Per-run results table, also saved as ``runs.csv``.
     """
     args = parse_args(argv)
     # Same settings as the baseline script, so results are repeatable.
@@ -484,7 +533,6 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
         # Marker first, so a stopped rerun never looks complete.
         for name in (MARKER_FILE, *CSV_FILES):
             (args.output_dir / name).unlink(missing_ok=True)
-    run_id = uuid.uuid4().hex
     configs = [
         (mode, size, seed)
         for size in args.hidden_sizes
@@ -493,10 +541,7 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
     ]
     rows = []
     for number, (mode, size, seed) in enumerate(configs, start=1):
-        row = {
-            "run_id": run_id,
-            **run_once(datasets, mode, size, seed, args.epochs, args.patience),
-        }
+        row = run_once(datasets, mode, size, seed, args.epochs, args.patience)
         rows.append(row)
         print(
             f"[{number}/{len(configs)}] {mode:8s} hidden={size:3d} seed={seed} "
@@ -507,21 +552,13 @@ def main(argv: Sequence[str] | None = None) -> pd.DataFrame:
         pd.DataFrame(rows).to_csv(args.output_dir / "runs.csv", index=False)
     results = pd.DataFrame(rows)
     summary = summarize(results)
-    summary.assign(run_id=run_id).to_csv(args.output_dir / "summary.csv")
+    summary.to_csv(args.output_dir / "summary.csv")
     print("\nMean ± std across seeds (test set, cutoff 1e-8):")
     print(format_table(summary, [*METRICS, "n_params", "best_epoch"]))
     differences = matched_differences(results)
     # Always write it, so a rerun never leaves an older file behind.
-    differences.assign(run_id=run_id).to_csv(
-        args.output_dir / "matched_differences.csv"
-    )
-    # Written last, after all three tables.
-    arguments = {
-        name: str(value) if isinstance(value, Path) else value
-        for name, value in vars(args).items()
-    }
-    marker = {"run_id": run_id, "arguments": arguments, "files": list(CSV_FILES)}
-    (args.output_dir / MARKER_FILE).write_text(json.dumps(marker, indent=2) + "\n")
+    differences.to_csv(args.output_dir / "matched_differences.csv")
+    write_marker(args.output_dir, vars(args))
     if len(differences):
         print("\nMatched differences (same seed and hidden size):")
         print("IBS < 0 favors the first mode; C-index and IBLL > 0 do.")
