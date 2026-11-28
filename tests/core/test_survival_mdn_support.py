@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import torch
+from filelock import FileLock
 
 from pyhealth.datasets import get_dataloader
 from pyhealth.models import SurvivalMDN
@@ -807,7 +808,7 @@ class TestAblationHelpers(unittest.TestCase):
         (self.output / "runs.csv").write_text("run_id\n")
         with self.assertRaises(SystemExit):
             ablation.parse_args(self.argv)
-        # The refused run released its lock, so --overwrite can take it.
+        # --overwrite is accepted and deletes the old results.
         self.assertTrue(self.reserve(self.argv + ["--overwrite"]).overwrite)
         self.assertFalse((self.output / "runs.csv").exists())
 
@@ -857,6 +858,20 @@ class TestAblationHelpers(unittest.TestCase):
             ablation.parse_args(argv + ["--output-dir", str(self.output)])
         for name in results:
             self.assertTrue((self.output / name).exists(), name)
+
+    def test_main_writes_complete_run_and_frees_lock(self):
+        # main() changes these for the whole process; put them back afterwards.
+        self.addCleanup(torch.set_num_threads, torch.get_num_threads())
+        self.addCleanup(
+            torch.use_deterministic_algorithms,
+            torch.are_deterministic_algorithms_enabled(),
+        )
+        ablation.main(self.argv + ["--epochs", "1", "--seeds", "0", "--hidden-sizes", "8"])
+        self.assertTrue(ablation.is_complete_run(self.output))
+        # Acquiring with no wait raises Timeout if the lock is still held.
+        lock = FileLock(self.output / ablation.LOCK_FILE)
+        lock.acquire(timeout=0)
+        lock.release()
 
     def test_duplicate_experiment_arguments_are_rejected(self):
         argv = ["--synthetic", "--output-dir", str(self.output)]
