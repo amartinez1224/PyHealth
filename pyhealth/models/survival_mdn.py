@@ -90,6 +90,14 @@ class SurvivalMDN(BaseModel):
         batch_norm: Normalize hidden layers before activation. Training batches
             then need at least two patients; singleton evaluation is supported.
         min_scale: Finite positive floor added to softplus scale outputs.
+        weight_mode: How mixture weights are produced; means and scales are
+            always patient-specific. ``"patient"`` (default) predicts weights
+            from each patient's features. ``"shared"`` learns one weight vector
+            used for every patient. ``"uniform"`` fixes every weight to ``1/K``
+            and has no weight parameters. The last two modes exist for ablation
+            studies of patient-specific weights. With the same random seed, all
+            three modes start with identical hidden layers and mean and scale
+            heads.
 
     Notes:
         Mean head weights start at zero and biases at evenly spaced centers
@@ -140,6 +148,7 @@ class SurvivalMDN(BaseModel):
         activation: str = "prelu",
         batch_norm: bool = False,
         min_scale: float = 1e-4,
+        weight_mode: str = "patient",
     ) -> None:
         keys = (feature_key, duration_key, event_key)
         if any(not isinstance(key, str) or not key for key in keys):
@@ -169,6 +178,8 @@ class SurvivalMDN(BaseModel):
             raise ValueError("n_components must be a positive integer.")
         if activation not in ("prelu", "relu"):
             raise ValueError("activation must be 'prelu' or 'relu'.")
+        if weight_mode not in ("patient", "shared", "uniform"):
+            raise ValueError("weight_mode must be 'patient', 'shared' or 'uniform'.")
         if (
             isinstance(min_scale, bool)
             or not isinstance(min_scale, (int, float))
@@ -216,6 +227,8 @@ class SurvivalMDN(BaseModel):
         self.input_width = width
         self.batch_norm = batch_norm
         self.min_scale = min_scale
+        self.weight_mode = weight_mode
+        self.n_components = n_components
         layers = []
         for hidden_width in hidden_dims:
             layers.append(nn.Linear(width, hidden_width, bias=not batch_norm))
@@ -224,7 +237,12 @@ class SurvivalMDN(BaseModel):
             layers.append(nn.PReLU() if activation == "prelu" else nn.ReLU())
             width = hidden_width
         self.hidden = nn.Sequential(*layers)
-        self.weight_head = nn.Linear(width, n_components)
+        # Build in every mode so all modes start with the same other weights.
+        weight_head = nn.Linear(width, n_components)
+        if weight_mode == "patient":
+            self.weight_head = weight_head
+        elif weight_mode == "shared":
+            self.shared_weight_logits = nn.Parameter(torch.zeros(n_components))
         self.mean_head = nn.Linear(width, n_components)
         self.scale_head = nn.Linear(width, n_components)
         nn.init.zeros_(self.mean_head.weight)
@@ -235,24 +253,79 @@ class SurvivalMDN(BaseModel):
                 else torch.zeros(1)
             )
 
-    def _convert(self, value, name, *, floating=False):
+    def _convert(
+        self, value: torch.Tensor, name: str, *, floating: bool = False
+    ) -> torch.Tensor:
+        """Check a raw input tensor and move it to the model device and dtype.
+
+        Args:
+            value: Input tensor from the batch.
+            name: Field name used in error messages.
+            floating: Whether the input must already be a floating tensor.
+
+        Returns:
+            The tensor on the model device, in the model dtype.
+
+        Raises:
+            TypeError: If ``value`` is not a tensor, is not floating when
+                ``floating`` is set, or the model dtype is not float32/float64.
+            ValueError: If ``value`` is complex or not finite after conversion.
+        """
         if not isinstance(value, torch.Tensor):
             raise TypeError(f"{name} must be a raw tensor, not a tuple/list.")
         if floating and not value.is_floating_point():
             raise TypeError(f"{name} must be a floating tensor.")
         if value.is_complex():
             raise ValueError(f"{name} must contain real values.")
-        weight = self.weight_head.weight
-        if weight.dtype not in (torch.float32, torch.float64):
+        # Use mean_head because weight_head does not exist in every mode.
+        reference = self.mean_head.weight
+        if reference.dtype not in (torch.float32, torch.float64):
             raise TypeError("Model dtype must be float32 or float64.")
-        value = value.to(device=weight.device, dtype=weight.dtype)
+        value = value.to(device=reference.device, dtype=reference.dtype)
         if not torch.isfinite(value).all():
             raise ValueError(
                 f"{name} must be finite within the model dtype numerical range."
             )
         return value
 
-    def _parameters_from_features(self, kwargs):
+    def _log_weights(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Return mixture log weights for the configured weight mode.
+
+        Args:
+            hidden: Output of the hidden layers, shape [B, H].
+
+        Returns:
+            Log weights of shape [B, K].
+        """
+        batch_size = hidden.shape[0]
+        if self.weight_mode == "patient":
+            return F.log_softmax(self.weight_head(hidden), dim=-1)
+        if self.weight_mode == "shared":
+            shared = F.log_softmax(self.shared_weight_logits, dim=-1)
+            return shared.to(hidden.dtype).expand(batch_size, -1)
+        return torch.full(
+            (batch_size, self.n_components),
+            -math.log(self.n_components),
+            dtype=hidden.dtype,
+            device=hidden.device,
+        )
+
+    def _parameters_from_features(
+        self, kwargs: dict[str, Any]
+    ) -> dict[str, torch.Tensor]:
+        """Predict the mixture parameters from the batch features.
+
+        Args:
+            kwargs: Batch fields; must contain the feature field.
+
+        Returns:
+            ``log_weights``, ``means`` and ``scales``, each of shape [B, K].
+
+        Raises:
+            ValueError: If the feature field is missing, has the wrong shape,
+                the batch is empty, a BatchNorm training batch has one patient,
+                or the predicted parameters are not finite.
+        """
         if self.feature_key not in kwargs:
             raise ValueError(f"Missing feature field {self.feature_key!r}.")
         features = self._convert(kwargs[self.feature_key], "features", floating=True)
@@ -266,7 +339,7 @@ class SurvivalMDN(BaseModel):
             )
         hidden = self.hidden(features)
         outputs = {
-            "log_weights": F.log_softmax(self.weight_head(hidden), dim=-1),
+            "log_weights": self._log_weights(hidden),
             "means": self.mean_head(hidden),
             "scales": F.softplus(self.scale_head(hidden)) + self.min_scale,
         }

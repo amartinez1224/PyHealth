@@ -1,15 +1,20 @@
 """Offline tests for the example-scoped released SUPPORT adapter."""
 
+import argparse
 import importlib.util
+import io
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import torch
+from filelock import FileLock
 
 from pyhealth.datasets import get_dataloader
 from pyhealth.models import SurvivalMDN
@@ -20,6 +25,15 @@ SPEC = importlib.util.spec_from_file_location(
 )
 support = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(support)
+
+# The ablation script imports survival_mdn_support by name.
+sys.modules.setdefault("survival_mdn_support", support)
+ABLATION_SPEC = importlib.util.spec_from_file_location(
+    "support_ablation_example",
+    Path(__file__).resolve().parents[2] / "examples/survival_mdn_support_ablation.py",
+)
+ablation = importlib.util.module_from_spec(ABLATION_SPEC)
+ABLATION_SPEC.loader.exec_module(ablation)
 
 
 class TestSupportEnvironment(unittest.TestCase):
@@ -759,6 +773,185 @@ class TestSupportLoader(unittest.TestCase):
                     + option
                 )
         self.assertFalse((self.root / "invalid").exists())
+
+
+class TestAblationHelpers(unittest.TestCase):
+    def setUp(self) -> None:
+        """Create a temp output folder and the base arguments."""
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.output = Path(self.temporary.name)
+        self.argv = ["--synthetic", "--output-dir", str(self.output)]
+
+    def reserve(self, argv: list[str]) -> argparse.Namespace:
+        """Parse arguments and release the lock they take after the test.
+
+        Args:
+            argv: Command line arguments for the ablation script.
+
+        Returns:
+            Parsed arguments, holding the output folder lock.
+        """
+        args = ablation.parse_args(argv)
+        self.addCleanup(args.lock.release)
+        return args
+
+    def test_matched_differences_skip_incomplete_pairs(self) -> None:
+        """Pairs missing a score are left out of the matched differences."""
+        rows = [
+            {"weight_mode": mode, "hidden_size": 32, "seed": seed, "ibs": ibs}
+            for mode, seed, ibs in (
+                ("patient", 0, 0.18),
+                ("shared", 0, 0.19),
+                ("patient", 1, 0.17),
+                ("shared", 1, np.nan),
+                ("patient", 2, 0.16),
+            )
+        ]
+        table = ablation.matched_differences(pd.DataFrame(rows))
+        row = table.loc[("patient - shared", 32)]
+        self.assertEqual(row["n_pairs"], 1)
+        self.assertAlmostEqual(row["ibs_mean"], -0.01)
+
+    def test_existing_results_need_overwrite(self) -> None:
+        """Old results are refused unless --overwrite is passed."""
+        # The first run finished: its lock is released and its results remain.
+        self.reserve(self.argv).lock.release()
+        (self.output / "runs.csv").write_text("run_id\n")
+        with self.assertRaises(SystemExit):
+            ablation.parse_args(self.argv)
+        # --overwrite is accepted. main() deletes the old results later, once
+        # the data has loaded.
+        self.assertTrue(self.reserve(self.argv + ["--overwrite"]).overwrite)
+        self.assertTrue((self.output / "runs.csv").exists())
+
+    def test_header_only_table_from_another_run_is_rejected(self) -> None:
+        """A table that does not match its hash fails the check."""
+        for name in ablation.CSV_FILES:
+            (self.output / name).write_text("comparison,hidden_size\npatient,32\n")
+        ablation.write_marker(self.output, {"synthetic": True})
+        self.assertTrue(ablation.is_complete_run(self.output))
+        (self.output / "matched_differences.csv").write_text("comparison,hidden_size\n")
+        self.assertFalse(ablation.is_complete_run(self.output))
+
+    def test_damaged_marker_is_rejected(self) -> None:
+        """A cut-off or malformed marker means the run is incomplete."""
+        for name in ablation.CSV_FILES:
+            (self.output / name).write_text("weight_mode\npatient\n")
+        ablation.write_marker(self.output, {"synthetic": True})
+        marker = self.output / ablation.MARKER_FILE
+        text = marker.read_text()
+        for damaged in (text[:40], '{"sha256": []}'):
+            with self.subTest(marker=damaged):
+                marker.write_text(damaged)
+                self.assertFalse(ablation.is_complete_run(self.output))
+
+    def test_loaded_tables_are_the_checked_bytes(self) -> None:
+        """Tables come from the bytes that passed the hash check."""
+        for name in ablation.CSV_FILES:
+            (self.output / name).write_text("weight_mode\npatient\n")
+        ablation.write_marker(self.output, {"synthetic": True})
+        read_csv = pd.read_csv
+
+        def rewrite_then_parse(source: io.BytesIO) -> pd.DataFrame:
+            """Replace every table on disk, as another run would, then parse.
+
+            Args:
+                source: Bytes that already passed the hash check.
+
+            Returns:
+                The table parsed from ``source``.
+            """
+            for name in ablation.CSV_FILES:
+                (self.output / name).write_text("weight_mode\nshared\n")
+            return read_csv(source)
+
+        with patch.object(ablation.pd, "read_csv", side_effect=rewrite_then_parse):
+            tables = ablation.load_complete_run(self.output)
+        for name in ablation.CSV_FILES:
+            self.assertEqual(tables[name]["weight_mode"].tolist(), ["patient"], name)
+        self.assertEqual(tables["arguments"], {"synthetic": True})
+
+    def test_output_dir_is_reserved_for_one_run(self) -> None:
+        """A second run cannot take a folder that is in use."""
+        self.reserve(self.argv)
+        with self.assertRaises(SystemExit):
+            ablation.parse_args(self.argv)
+
+    def test_lock_file_from_dead_process_does_not_block(self) -> None:
+        """A leftover lock file does not block a new run."""
+        # A crashed run leaves the file, but nothing holds the OS lock.
+        (self.output / ablation.LOCK_FILE).touch()
+        self.assertTrue(self.reserve(self.argv).lock.is_locked)
+
+    def test_overwrite_cannot_take_folder_in_use(self) -> None:
+        """--overwrite cannot delete results of a live run."""
+        self.reserve(self.argv)
+        (self.output / "runs.csv").write_text("run_id\n")
+        with self.assertRaises(SystemExit):
+            ablation.parse_args(self.argv + ["--overwrite"])
+        # The live run's results were not deleted.
+        self.assertTrue((self.output / "runs.csv").exists())
+
+    def test_missing_data_dir_keeps_old_results(self) -> None:
+        """A missing --data-dir is refused before old results are deleted."""
+        results = (*ablation.CSV_FILES, ablation.MARKER_FILE)
+        for name in results:
+            (self.output / name).write_text("old\n")
+        argv = ["--data-dir", str(self.output / "missing"), "--overwrite"]
+        with self.assertRaises(SystemExit):
+            ablation.parse_args(argv + ["--output-dir", str(self.output)])
+        for name in results:
+            self.assertTrue((self.output / name).exists(), name)
+
+    def restore_torch_settings(self) -> None:
+        """main() changes these for the whole process; put them back afterwards."""
+        self.addCleanup(torch.set_num_threads, torch.get_num_threads())
+        self.addCleanup(
+            torch.use_deterministic_algorithms,
+            torch.are_deterministic_algorithms_enabled(),
+        )
+
+    def test_corrupt_data_keeps_old_results(self) -> None:
+        """Corrupt data fails before --overwrite deletes old results."""
+        self.restore_torch_settings()
+        results = (*ablation.CSV_FILES, ablation.MARKER_FILE)
+        for name in results:
+            (self.output / name).write_text("old\n")
+        data = self.output / "data"
+        data.mkdir()
+        for name in ("train_1.npz", "valid_1.npz", "test_1.npz"):
+            (data / name).write_bytes(b"not an npz file")
+        argv = ["--data-dir", str(data), "--output-dir", str(self.output)]
+        with self.assertRaises(ValueError):
+            ablation.main(argv + ["--overwrite"])
+        for name in results:
+            self.assertTrue((self.output / name).exists(), name)
+
+    def test_main_writes_complete_run_and_frees_lock(self) -> None:
+        """A synthetic run is complete and frees the lock."""
+        self.restore_torch_settings()
+        # Smaller than the script's synthetic data, so the test stays fast.
+        small = ablation.make_synthetic_datasets(sizes=(60, 30, 40))
+        argv = self.argv + ["--epochs", "1", "--seeds", "0", "--hidden-sizes", "8"]
+        with patch.object(ablation, "make_synthetic_datasets", return_value=small):
+            ablation.main(argv)
+        self.assertTrue(ablation.is_complete_run(self.output))
+        # Acquiring with no wait raises Timeout if the lock is still held.
+        lock = FileLock(self.output / ablation.LOCK_FILE)
+        lock.acquire(timeout=0)
+        lock.release()
+
+    def test_duplicate_experiment_arguments_are_rejected(self) -> None:
+        """Duplicate seeds, sizes or modes are refused."""
+        argv = ["--synthetic", "--output-dir", str(self.output)]
+        for option in (
+            ["--seeds", "0", "0"],
+            ["--hidden-sizes", "32", "64", "32"],
+            ["--weight-modes", "patient", "patient"],
+        ):
+            with self.subTest(option=option[0]), self.assertRaises(SystemExit):
+                ablation.parse_args(argv + option)
 
 
 if __name__ == "__main__":

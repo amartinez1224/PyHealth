@@ -816,5 +816,205 @@ class TestSurvivalIntegration(unittest.TestCase):
             trainer.load_ckpt(path)
 
 
+class TestWeightModes(unittest.TestCase):
+    """Mixture-weight ablation modes on tiny synthetic tensors."""
+
+    MODES = ("patient", "shared", "uniform")
+    N_COMPONENTS = 3
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        """Build one tiny dataset and batch shared by every test."""
+        cls.dataset = _dataset()
+        cls.batch = _batch(cls.dataset)
+
+    def _model(self, mode: str, seed: int = 5) -> SurvivalMDN:
+        """Build a small model with a fixed seed.
+
+        Args:
+            mode: Weight mode of the model.
+            seed: Seed for the initial parameters.
+
+        Returns:
+            The model.
+        """
+        torch.manual_seed(seed)
+        return SurvivalMDN(
+            self.dataset,
+            hidden_dims=(8, 6),
+            n_components=self.N_COMPONENTS,
+            weight_mode=mode,
+        )
+
+    def test_default_mode_is_patient(self) -> None:
+        """The default weight mode is patient, with a weight head."""
+        model = SurvivalMDN(self.dataset, hidden_dims=(4,))
+        self.assertEqual(model.weight_mode, "patient")
+        self.assertTrue(hasattr(model, "weight_head"))
+
+    def test_forward_shapes_and_weights_sum_to_one(self) -> None:
+        """Every mode gives [B, K] outputs and weights that sum to one."""
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                output = self._model(mode)(**self.batch)
+                for name in ("log_weights", "means", "scales"):
+                    self.assertEqual(output[name].shape, (4, 3))
+                torch.testing.assert_close(
+                    output["log_weights"].exp().sum(-1), torch.ones(4)
+                )
+                self.assertEqual(output["loss"].shape, ())
+                self.assertTrue(torch.isfinite(output["loss"]))
+
+    def test_uniform_weights_and_no_weight_parameters(self) -> None:
+        """Uniform mode gives 1/K weights and has no weight parameters."""
+        model = self._model("uniform")
+        output = model(**self.batch)
+        torch.testing.assert_close(
+            output["log_weights"].exp(), torch.full((4, 3), 1 / 3)
+        )
+        self.assertFalse(hasattr(model, "weight_head"))
+        names = [name for name, _ in model.named_parameters()]
+        self.assertFalse(
+            any("weight_head" in name or "shared" in name for name in names)
+        )
+
+    def test_shared_weights_identical_across_patients(self) -> None:
+        """Shared mode gives every patient the same learned weights."""
+        model = self._model("shared")
+        with torch.no_grad():
+            model.shared_weight_logits.copy_(torch.tensor([0.5, -1.0, 2.0]))
+        weights = model(features=self.batch["features"])["log_weights"]
+        torch.testing.assert_close(weights, weights[:1].expand(4, -1))
+        expected = torch.tensor([0.5, -1.0, 2.0]).log_softmax(-1)
+        torch.testing.assert_close(weights[0], expected)
+        self.assertFalse(hasattr(model, "weight_head"))
+
+    def test_patient_weights_vary_across_patients(self) -> None:
+        """Patient mode gives different weights to different patients."""
+        weights = self._model("patient")(features=self.batch["features"])
+        self.assertFalse(
+            torch.allclose(weights["log_weights"], weights["log_weights"][:1])
+        )
+
+    def test_gradients_reach_expected_parameters(self) -> None:
+        """Gradients reach the heads, and the shared logits in shared mode."""
+        for mode in ("shared", "uniform"):
+            with self.subTest(mode=mode):
+                model = self._model(mode)
+                model(**self.batch)["loss"].backward()
+                for head in (model.mean_head, model.scale_head):
+                    self.assertGreater(head.bias.grad.abs().sum(), 0)
+                if mode == "shared":
+                    self.assertGreater(model.shared_weight_logits.grad.abs().sum(), 0)
+
+    def test_parameter_counts_differ_only_by_weight_parameters(self) -> None:
+        """Modes differ in size only by their weight parameters."""
+        counts = {
+            mode: sum(p.numel() for p in self._model(mode).parameters())
+            for mode in self.MODES
+        }
+        self.assertEqual(counts["shared"] - counts["uniform"], self.N_COMPONENTS)
+        self.assertGreater(counts["patient"], counts["shared"])
+
+    def test_predict_survival_and_dtype_conversion_without_weight_head(self) -> None:
+        """Survival curves work in float64 without a weight head."""
+        model = self._model("uniform").double()
+        times = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
+        curves = model.eval().predict_survival(times, features=self.batch["features"])
+        self.assertEqual(curves.shape, (4, 3))
+        self.assertEqual(curves.dtype, torch.float64)
+
+    def test_same_seed_gives_identical_shared_parameters(self) -> None:
+        """With the same seed, all modes share their starting parameters."""
+        # Only the mixture weights may differ between modes, so the ablation
+        # compares weight modes and not different random starting points.
+        states = {mode: self._model(mode).state_dict() for mode in self.MODES}
+        common = [
+            key for key in states["patient"] if not key.startswith("weight_head.")
+        ]
+        for prefix in ("hidden.", "mean_head.", "scale_head."):
+            self.assertTrue(any(key.startswith(prefix) for key in common))
+        for mode in ("shared", "uniform"):
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    set(states[mode]) - {"shared_weight_logits"}, set(common)
+                )
+                for key in common:
+                    torch.testing.assert_close(
+                        states[mode][key], states["patient"][key], atol=0, rtol=0
+                    )
+
+    def test_checkpoint_round_trip_for_each_mode(self) -> None:
+        """Every mode saves and reloads to identical predictions."""
+        weight_keys = {
+            "patient": {"weight_head.weight", "weight_head.bias"},
+            "shared": {"shared_weight_logits"},
+            "uniform": set(),
+        }
+        grid = torch.tensor([0.0, 0.5, 2.0])
+        features = self.batch["features"]
+        for mode in self.MODES:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                model = self._model(mode)
+                if mode == "shared":
+                    # A fresh model starts at zeros, so use values it cannot match.
+                    with torch.no_grad():
+                        model.shared_weight_logits.copy_(torch.tensor([0.5, -1.0, 2.0]))
+                path = str(Path(directory) / "model.ckpt")
+                Trainer(model, device="cpu", enable_logging=False).save_ckpt(path)
+
+                saved = torch.load(path, weights_only=True)
+                saved_weight_keys = {
+                    key
+                    for key in saved
+                    if key.startswith("weight_head.") or key == "shared_weight_logits"
+                }
+                self.assertEqual(saved_weight_keys, weight_keys[mode])
+                if mode == "shared":
+                    self.assertEqual(
+                        saved["shared_weight_logits"].shape, (self.N_COMPONENTS,)
+                    )
+
+                restored = self._model(mode, seed=99)
+                self.assertFalse(
+                    all(
+                        torch.equal(value, restored.state_dict()[key])
+                        for key, value in saved.items()
+                    )
+                )
+                Trainer(restored, device="cpu", enable_logging=False).load_ckpt(path)
+                for key, value in model.state_dict().items():
+                    torch.testing.assert_close(
+                        restored.state_dict()[key], value, atol=0, rtol=0
+                    )
+                torch.testing.assert_close(
+                    restored.eval().predict_survival(grid, features=features),
+                    model.eval().predict_survival(grid, features=features),
+                )
+
+    def test_checkpoint_rejects_other_weight_mode(self) -> None:
+        """A checkpoint from another weight mode fails to load."""
+        for saved_mode, loaded_mode in (("shared", "uniform"), ("uniform", "shared")):
+            with (
+                self.subTest(saved=saved_mode, loaded=loaded_mode),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = str(Path(directory) / "model.ckpt")
+                Trainer(
+                    self._model(saved_mode), device="cpu", enable_logging=False
+                ).save_ckpt(path)
+                trainer = Trainer(
+                    self._model(loaded_mode), device="cpu", enable_logging=False
+                )
+                with self.assertRaises(RuntimeError):
+                    trainer.load_ckpt(path)
+
+    def test_invalid_weight_mode_raises(self) -> None:
+        """An unknown weight mode raises ValueError."""
+        for bad in ("Patient", "", "none", None, 1):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                SurvivalMDN(self.dataset, weight_mode=bad)
+
+
 if __name__ == "__main__":
     unittest.main()
